@@ -17,23 +17,30 @@ notices. Extract the complete archive and launch `KnockTray.exe`; no build step
 is required. Saved data remains under `%LOCALAPPDATA%\Knock`.
 
 - C++20, Win32/GDI/GDI+, per-account/session named pipe, durable JSON store.
-- UI reference: default 420 × 510 logical pixels, #090909 background, #151515
-  tabs, #474747 borders, light monospace text, bundled pixel art. Settings
-  allow widths of 360–800 and heights of 360–1000 logical pixels, clamped to
-  the monitor work area when shown. The popup uses tool-window flags and has
-  no window controls. Opening from the tray hides on deactivation; opening by
-  hotkey keeps it topmost and open across focus changes until toggled or hidden.
-  Escape backs out of the current view before hiding the popup.
+- UI: a wide bar centred at the top of the work area, default 1720 × 380
+  logical pixels (Settings: 900–3840 × 300–800, clamped to the work area).
+  Columns: task list (drawn panel, click to edit, New task field), job cards
+  (content window, horizontal scroll), status column, notes column (search,
+  `#` tag filter, `+`), and an arrow strip that collapses the notes column and
+  shrinks the bar; `window.notes_collapsed` persists it. Side columns narrow
+  before the cards do. Colours: #1B1B1B frame, #202020 panels, #171717 wells.
+  Headings, tags and job names use the bitmap font in `pixel_font.hpp`.
+  The bar uses tool-window flags and has no window controls. Opening from the
+  tray hides on deactivation; opening by hotkey keeps it topmost and open
+  across focus changes until toggled or hidden. Escape backs out of the
+  current view before hiding the bar. Notes, tasks, Settings, note pages and
+  the tag picker open in the middle column in place of the cards.
 - Requests require a chat label. Yes, No, and custom replies are persisted.
   Only trusted UI calls may resolve requests. A custom reply never grants input.
 - Custom replies have up to 12 saved presets, managed in Settings → More.
   Choosing a preset only fills the editor; SEND submits the reply.
-- Manual presence is shown beneath the terminal tabs: At PC, Away, Busy, plus
-  an optional 500-byte UTF-8 message. The initial state is unknown until set.
-  The status editor is reachable from the strip and popup/tray menus; SAVE
-  applies both fields, BACK discards the draft, and incoming events never
-  reseed the editor. Presence survives restart and changes only through trusted
-  GUI calls. It is independent of input leases and notification preferences.
+- Manual presence has its own column: At PC, Away, Busy, plus an optional
+  500-byte UTF-8 message (edit 45). Clicking a state saves it with the message;
+  Enter, leaving the box, hiding and a 1.5 s pause after typing save a changed
+  message when a state is set. Incoming events never replace a message being
+  typed. The initial state is unknown until set. Presence survives restart
+  and changes only through trusted GUI calls. It is independent of input
+  leases and notification preferences.
 - `knock presence` reads availability. Status and request create/result/wait
   responses include it. Ordinary `knock request` passes stop_when_unavailable
   to the condition-variable wait: Away/Busy returns pending, exit 7, with
@@ -44,12 +51,18 @@ is required. Saved data remains under `%LOCALAPPDATA%\Knock`.
 - A persisted quiet deadline suppresses banners for 15/30/60 minutes without
   resolving requests or extending expiry. The app clears the deadline and sends
   one inbox summary when the timer ends. Right-click or the tray menu controls
-  the timer; its status is shown above the popup content and in the tray tooltip.
+  the timer; its status is shown in the status column and in the tray tooltip.
   The stored preference remains busy_until for compatibility; the interface
   calls it Quiet to distinguish it from manual Busy presence.
-- The inbox filters by exact chat label from a card or CHATS selector. Pending
-  requests sort first. Notification clicks clear the filter before opening the
-  relevant request/result.
+- Job cards group requests, jobs/notices and the finished inbox by chat label.
+  WAITING (pending requests, oldest first, YES/CUSTOM/NO) sorts first, then
+  WORKING (latest result or answer, COPY/VIEW LOG or RELEASE INPUT), then DONE
+  (`knock done` summary, COPY REPORT). A card is DONE while its done record is
+  newer than its other activity. Dismissing a card archives its finished items.
+  Each card's character comes from `make_character(chat)` in `character.cpp`.
+- `knock done` stores a plain-text summary (terminal codes stripped), an
+  absolute report path, and marks matching tasks done; one record per chat.
+  `knock inbox` pages the records. Existing commands' JSON is unchanged.
 - Input approvals are exclusive, time-limited cooperative leases. Release,
   timeout, and restart revoke permission. Blocking CLI waits use a condition
   variable, so the model does not need to poll.
@@ -107,12 +120,10 @@ is required. Saved data remains under `%LOCALAPPDATA%\Knock`.
   source for the CLI text. `help` and `info` produce plain text; other commands
   keep their JSON contract. The guide explains single waits, detached jobs,
   retaining IDs and bounded output; it makes no automatic CLI-resume claim.
-- Terminal-style tabs have icons, separate tab surfaces,
-  and an active tab connected to the content. Scroll thumbs are one logical
-  pixel wide, with wider invisible drag targets.
-- All three original GIFs are bundled unchanged. The sprite renderer removes
-  transparent canvas padding, preserves frame timing, and pauses outside the
-  visible Notifications tab. Optional local asset overrides remain supported.
+- The drawn task and note lists expose their row titles as window text
+  (controls 61 and 62) for screen readers and the UI tests.
+- The original GIFs are still bundled and the GIF decoder and its test remain,
+  but the bar draws generated characters instead.
 - Dark child-control initialization, background erasure, and batched layout
   painting address the white tab-switch flash. The bottom command-labelled
   buttons are removed; Enter creates a task or opens a new note conversation.
@@ -125,7 +136,9 @@ is required. Saved data remains under `%LOCALAPPDATA%\Knock`.
 | Windows encoding, paths, process arguments | `src/platform_win.cpp` |
 | Framed local pipe and access control | `src/ipc_win.cpp` |
 | CLI and detached command execution | `src/cli.cpp`, `src/runner_win.cpp` |
-| Tray lifecycle and rendering | `src/tray_main.cpp`, `src/ui.cpp` |
+| Tray lifecycle and rendering | `src/tray_main.cpp`, `src/ui.cpp`, `include/knock/pixel_font.hpp` |
+| Job characters | `src/character.cpp`, `include/knock/character.hpp` |
+| COPY REPORT text | `include/knock/report.hpp` |
 | GIF decoding, crop, and timing | `src/sprite_win.cpp`, `include/knock/sprite.hpp` |
 | Clipboard images and thumbnail rendering | `src/note_images_win.cpp`, `include/knock/note_images.hpp` |
 | Global shortcut and capture dialog | `src/hotkey_win.cpp`, `include/knock/hotkey.hpp` |

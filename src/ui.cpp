@@ -3292,7 +3292,7 @@ private:
         outline(dc, area, RGB(56, 56, 56));
 
         const int heading = pixel_scale(2.0);
-        const RECT tasks_heading{tasks_rect_.left, tasks_rect_.top, tasks_rect_.left + pixel_width(L"Task List", heading) + px(16),
+        const RECT tasks_heading{tasks_rect_.left, tasks_rect_.top, tasks_rect_.left + pixel_width(L"Task List", heading) + 2 * px(8),
                                  tasks_rect_.top + px(28)};
         fill(dc, tasks_heading, well);
         pixel_text(dc, L"Task List", RECT{tasks_heading.left + px(8), tasks_heading.top, tasks_heading.right, tasks_heading.bottom},
@@ -3583,14 +3583,14 @@ private:
             const auto g = card_geometry(x, height);
             const bool waiting = card.state == "waiting", done = card.state == "done";
             const std::wstring tag = waiting ? L"WAITING" : done ? L"DONE" : L"WORKING";
-            const int tag_w = pixel_width(tag, tag_scale) + px(14);
+            const int tag_w = pixel_width(tag, tag_scale) + 2 * px(7);
             const RECT tag_box{x + (card_width_ - tag_w) / 2, g.tag.top + px(2), x + (card_width_ + tag_w) / 2, g.tag.bottom};
             fill(dc, tag_box, waiting ? orange_fill : done ? green_fill : blue_fill);
             pixel_text(dc, tag, tag_box, tag_scale, waiting ? orange : done ? green : blue, true);
             const auto name = widen(card.chat);
             int name_scale = base_name_scale;
             while (name_scale > 1 && pixel_width(name, name_scale) > card_width_ - px(24)) --name_scale;
-            const int name_w = std::min(card_width_, (pixel_printable(name) ? pixel_width(name, name_scale) : card_width_) + px(20));
+            const int name_w = std::min(card_width_, (pixel_printable(name) ? pixel_width(name, name_scale) : card_width_) + 2 * px(10));
             const RECT name_box{x + (card_width_ - name_w) / 2, g.name.top, x + (card_width_ + name_w) / 2, g.name.bottom};
             fill(dc, name_box, raised);
             pixel_text(dc, name, RECT{name_box.left + px(10), name_box.top, name_box.right - px(10), name_box.bottom},

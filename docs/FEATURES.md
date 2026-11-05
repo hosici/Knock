@@ -1,23 +1,27 @@
-# Feature tracker — version 0.6.0
+# Feature tracker — version 0.6.0, plus the top-bar redesign
 
-- [x] Windows tray lifecycle and popup with no taskbar icon flags
-- [x] Reference-matching Notifications, Task List, Notes
+- [x] Windows tray lifecycle and a top-of-screen bar with no taskbar icon flags
+- [x] Bar layout: task list, horizontally scrolling job cards, status column, notes column with search
+- [x] Job cards per chat label with WAITING / WORKING / DONE tags and actions under a text box
+- [x] Pixel-art character generated per job name (deterministic, no image files) and a bitmap heading font
+- [x] Notes column collapses with the arrow; the choice persists
+- [x] `knock done` finished inbox: clean summary, absolute report path, matching task marked done
+- [x] `knock inbox` JSON listing; COPY REPORT copies summary and path as plain CRLF text
 - [x] Permission request Yes / No / Custom
 - [x] Saved custom-reply presets with add/edit/delete in Settings; selection never sends or approves
 - [x] Manual At PC / Away / Busy status, optional message, persistent across restarts; unset until first selection
-- [x] Compact status strip and dedicated editor accessible from popup/tray menus
+- [x] Status column: one click saves At PC / Away / Busy with the optional message
 - [x] Read-only `knock presence`, presence in status/request responses, GUI-only updates
 - [x] Ordinary requests return pending immediately on Away/Busy; existing waits wake without granting permission
 - [x] Explicit `result --wait` retains its chosen budget regardless of presence
 - [x] Quiet notification timer for 15/30/60 minutes, persisted across restarts, with one inbox summary when it ends
-- [x] Chat-label and selector inbox filtering, with pending requests first
+- [x] Waiting cards first, then working, then finished
 - [x] Blocking CLI results, timeouts, cancellation, exclusive input lease
 - [x] Background command runner, captured output, completion notice and Copy
 - [x] Persistent tasks and personal conversation notes
 - [x] Account-scoped named pipe with explicit access control
 - [x] Bundled pixel assets and optional GIF loading
-- [x] Original animated GIFs with preserved frame timing and transparent bounds
-- [x] Terminal-style tabs with icons and an active tab joined to the content
+- [x] Original animated GIFs bundled (decoder kept and tested; no longer drawn)
 - [x] Thin one-logical-pixel scroll thumbs with usable drag targets
 - [x] Personal-note tag selector, custom tags, and tag/Untagged filtering
 - [x] Separate note title/description editing and conversation history

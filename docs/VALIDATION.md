@@ -509,3 +509,28 @@ their own spawned app and generated no global mouse or keyboard input.
 These are Wine checks, not Windows 11 desktop acceptance. Notification clicks,
 Explorer/taskbar behavior, Start-menu focus, multiple monitors, and high-DPI
 rendering still need the target desktop checks listed above.
+
+## Top-bar redesign and finished inbox (2026-11-05)
+
+Built with MinGW-w64 GCC 13 (`-Wall -Wextra -Wpedantic`, no warnings) and run
+under Wine 9.0 with Xvfb on Linux. These are Wine results, not Windows 11
+desktop checks.
+
+- Native Linux: `cli_info`, `characters`, `store` (38 groups) and
+  `window_settings` passed.
+- Under Wine: `cli_info_tests`, `character_tests`, `store_tests`,
+  `window_settings_tests`, `platform_tests`, `sprite_tests`,
+  `note_images_tests`, `hotkey_tests`, `inbox_ui_tests`, `notes_ui_tests` and
+  `ui_tests` all passed. The full `ui_tests` run completed in this session.
+- `tests/wine_smoke.py` passed all groups with the real binaries, including the
+  new `done`/`inbox` group.
+- `cli_info_tests` pins every existing command's IPC operation, printed JSON and
+  exit code, plus `done` and `inbox`. The store tests check the key sets of
+  existing responses and that `done` adds no jobs, requests or status fields.
+- The native UI tests drive the bar's real controls: one-click status with a
+  Unicode message, waiting cards ahead of newer results, COPY REPORT's exact
+  clipboard text, card dismissal, notes search, and the notes arrow.
+- Screenshots at 96, 120 and 144 DPI (100/125/150%) were taken on a 1920 × 1080
+  virtual display with Wine's LogPixels setting. Real Windows scaling, multiple
+  monitors and a top-docked taskbar still need checking on a Windows desktop.
+

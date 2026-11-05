@@ -155,11 +155,8 @@ if(WIN32)
     install(FILES HANDOFF.md DESTINATION .)
     install(FILES docs/VALIDATION.md docs/PROTOCOL.md docs/FEATURES.md
         docs/CLI.md docs/AGENT_INSTRUCTIONS.md DESTINATION docs)
-    install(FILES docs/screenshots/inbox.png docs/screenshots/note-conversation.png
-        docs/screenshots/note-find.png docs/screenshots/settings.png
-        docs/screenshots/saved-replies.png docs/screenshots/note-entry-edit.png
-        docs/screenshots/note-trash.png docs/screenshots/preferences.png
-        docs/screenshots/presence.png docs/screenshots/presence-inbox.png
+    install(FILES docs/screenshots/bar-100.png docs/screenshots/bar-125.png
+        docs/screenshots/bar-150.png docs/screenshots/bar-notes-collapsed.png
         DESTINATION docs/screenshots)
     install(FILES third_party/nlohmann-LICENSE.txt DESTINATION licenses)
 endif()

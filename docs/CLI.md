@@ -18,7 +18,7 @@ knock presence
 
 This returns `{ "ok": true, "presence": { "state": "away", "message": "Out for coffee", "updated_at": 1792641600000 } }` for an example Away status. The states are `at_pc`, `away`, `busy`, and `unknown` before a status is first set. `updated_at` is Unix milliseconds, or `0` when unset. The status is manual and persists across restarts until changed in the tray interface. There is no automatic idle detection or CLI setter.
 
-Click the status beneath the tabs or choose **Status...** from the popup or tray menu to change it. A message is optional and limited to 500 UTF-8 bytes. **SAVE** applies the status and message together; **BACK** discards the draft. Presence also appears in `knock status` and all successful request create/result/wait responses.
+Change it in the status column of the bar: click **At PC**, **Away** or **Busy**. The message box is optional and limited to 500 UTF-8 bytes; it is saved with the status when one is clicked, on **Enter**, or shortly after typing stops. **Status...** in the bar or tray menu focuses the message box. Presence also appears in `knock status` and all successful request create/result/wait responses.
 
 Presence is advisory. It never grants or revokes a lease, answers a request, or changes an expiry. The **Quiet** notification timer is a separate setting. Returning to At PC does not resume a CLI agent automatically.
 
@@ -92,7 +92,7 @@ If a blocking request loses its connection, its JSON error includes `request_id`
 knock run --chat AUDIO-1 --title "Release build" --cwd C:\Projects\Current -- cmake.exe --build build --config Release --parallel
 ```
 
-The command returns a job ID immediately. A small independent worker executes the program, captures its stdout and stderr, and waits for its exit. Closing the tray popup or exiting the tray process does not cancel that worker. When the command finishes, Knock records the exit code, a log path, and the latest output, then sends a notification. The completion card provides a continuation message to copy into the named chat.
+The command returns a job ID immediately. A small independent worker executes the program, captures its stdout and stderr, and waits for its exit. Hiding the bar or exiting the tray process does not cancel that worker. When the command finishes, Knock records the exit code, a log path, and the latest output, then sends a notification. The completion card provides a continuation message to copy into the named chat.
 
 ```powershell
 knock job JOB_ID
@@ -123,6 +123,41 @@ knock notify --chat AUDIO-4 --message "The audio build finished." --resume-text 
 ```
 
 This creates a copyable notice without running a command. It does not automatically resume an AI chat or send a message to another service.
+
+## Report a finished job
+
+When an agent has finished its whole job, it reports once:
+
+```powershell
+knock done --chat UI-1 --summary "All 335 layout checks passed. Nothing was committed." --report "C:\Reports\ui-1.md"
+```
+
+The chat's card turns to **DONE** and shows the summary. **COPY REPORT** puts
+the summary and the report path on the clipboard as plain text, with Windows
+line breaks and no terminal formatting. The response is
+`{ "ok": true, "done": { "id", "chat", "status": "done", "summary", "report", "created_at", "finished_at", "updated_at", "tasks_completed": [...] } }`.
+
+- `--summary` (or `--summary-file`) is required, up to 16000 UTF-8 bytes. ANSI
+  colour codes and other control characters except newlines and tabs are removed.
+- `--report` is optional. A relative path is made absolute from the current
+  directory; the file does not have to exist yet.
+- Unfinished tasks whose operator is the chat label, or whose title starts with
+  `LABEL:`, are marked `done` (ASCII case-insensitive). `--task TASK_ID` marks
+  only that task instead. Their IDs are listed in `tasks_completed`.
+- Each chat has one finished record. Running `done` again replaces the summary
+  and report, and a later request or command from the same chat turns the card
+  back to WAITING or WORKING.
+
+`done` never grants desktop input and does not resume a chat.
+
+```powershell
+knock inbox
+knock inbox --offset 50 --limit 50
+```
+
+`inbox` lists finished jobs, newest first, as
+`{ "ok": true, "inbox": [...], "total": 1, "next_offset": null }` with the same
+record shape. Cards dismissed in the app stay listed with `"archived": true`.
 
 ## Tasks
 
@@ -197,13 +232,14 @@ Use UTF-8 files when shell quoting would be awkward:
 knock request --chat AUDIO-1 --message-file C:\Temp\request.txt
 knock notes add --title "Bench observations" --body-file C:\Temp\observations.txt
 knock notify --chat BUILD-1 --message "Build complete" --resume-file C:\Temp\continuation.txt
+knock done --chat BUILD-1 --summary-file C:\Temp\summary.txt --report C:\Temp\report.md
 ```
 
 A UTF-8 BOM is accepted. A text option and its file alternative are mutually exclusive. File input is limited to 64 KiB; the destination field's own limit also applies.
 
 ## Local data and troubleshooting
 
-The `jobs`, `tasks list`, and `notes list` commands are paginated so large histories do not exceed the local transport limit. They return `total` and `next_offset`; `next_offset: null` means there are no more items. Use `--offset` and `--limit` to retrieve later pages. The default limit is 50 and the maximum is 100; a page may contain fewer items when bodies are large. `knock job JOB_ID` always retrieves that job's full saved details.
+The `jobs`, `inbox`, `tasks list`, and `notes list` commands are paginated so large histories do not exceed the local transport limit. They return `total` and `next_offset`; `next_offset: null` means there are no more items. Use `--offset` and `--limit` to retrieve later pages. The default limit is 50 and the maximum is 100; a page may contain fewer items when bodies are large. `knock job JOB_ID` always retrieves that job's full saved details.
 
 ```powershell
 knock jobs --offset 50 --limit 50

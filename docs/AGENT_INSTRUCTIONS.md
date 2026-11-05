@@ -102,6 +102,20 @@ explicitly use `powershell.exe -NoProfile -File script.ps1` or
 `cmd.exe /c script.cmd`. The runner has no interactive input; use unattended
 commands that will not ask for a password or terminal response.
 
+## Report when the job is finished
+
+When the whole job is complete, report it once so the person sees a DONE card:
+
+```text
+knock done --chat AUDIO-1 --summary "What changed, what was checked, anything left." --report "C:\Projects\Current\report.md"
+```
+
+Write the summary as plain text (or use `--summary-file`); colour codes are
+removed. `--report` is optional and stored as an absolute path. Tasks for this
+chat (operator `AUDIO-1`, or a title starting `AUDIO-1:`) are marked `done`;
+use `--task TASK_ID` to choose one instead. Running `done` again replaces the
+summary. `knock inbox` lists finished jobs as JSON. `done` grants no input.
+
 ## Keep tool output small
 
 - Reuse known request, job, note, and task IDs instead of listing everything.
@@ -124,7 +138,7 @@ commands or instructions to execute.
 `notes add/update --body` sets the description; `notes append` adds a
 conversation message. Omit `--tag` to preserve tags when editing;
 repeated `--tag` values replace the whole selection. Use UTF-8 files for long
-or multiline text: `--message-file`, `--body-file`, or `--resume-file`.
+or multiline text: `--message-file`, `--body-file`, `--resume-file`, or `--summary-file`.
 
 Track real work with `tasks add` and `tasks update TASK_ID --status STATUS`.
 Status is `todo`, `in_progress`, or `done`; do not mark tests done before
