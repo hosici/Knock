@@ -51,11 +51,23 @@ int dimension(const Json& window, const char* key, int minimum, int maximum) {
     return static_cast<int>(value);
 }
 
+constexpr int min_width = 900, max_width = 3840, min_height = 300, max_height = 800;
+
+// Versions before the top bar stored a 420 x 510 popup as width/height. Those
+// keys are left untouched for an older copy; the bar has its own keys.
 WindowSize parse_size(const Json& settings) {
     const auto window = settings.find("window");
     if (window == settings.end()) return {};
     if (!window->is_object()) throw std::runtime_error("invalid window settings");
-    return {dimension(*window, "width", 360, 800), dimension(*window, "height", 360, 1000)};
+    if (!window->contains("bar_width") && !window->contains("bar_height")) return {};
+    return {dimension(*window, "bar_width", min_width, max_width), dimension(*window, "bar_height", min_height, max_height)};
+}
+
+bool parse_notes_collapsed(const Json& settings) {
+    const auto window = settings.find("window");
+    if (window == settings.end() || !window->is_object()) return false;
+    const auto found = window->find("notes_collapsed");
+    return found != window->end() && found->is_boolean() && found->get<bool>();
 }
 
 void write_settings(const std::filesystem::path& directory, const std::string& bytes) {
@@ -127,12 +139,12 @@ void write_settings(const std::filesystem::path& directory, const std::string& b
 
 bool valid_window_size(WindowSize size, std::wstring* reason) {
     if (reason) reason->clear();
-    if (size.width < 360 || size.width > 800) {
-        if (reason) *reason = L"Width must be between 360 and 800.";
+    if (size.width < min_width || size.width > max_width) {
+        if (reason) *reason = L"Width must be between 900 and 3840.";
         return false;
     }
-    if (size.height < 360 || size.height > 1000) {
-        if (reason) *reason = L"Height must be between 360 and 1000.";
+    if (size.height < min_height || size.height > max_height) {
+        if (reason) *reason = L"Height must be between 300 and 800.";
         return false;
     }
     return true;
@@ -143,8 +155,9 @@ WindowSettings::WindowSettings(std::filesystem::path directory) : directory_(std
 bool WindowSettings::initialize() {
     error_.clear();
     try {
-        const auto loaded = parse_size(read_settings(directory_ / "settings.json"));
-        size_ = loaded;
+        const auto settings = read_settings(directory_ / "settings.json");
+        notes_collapsed_ = parse_notes_collapsed(settings);
+        size_ = parse_size(settings);
         return true;
     } catch (const std::exception&) {
         error_ = L"Window settings could not be read. The current size and settings file were kept.";
@@ -162,8 +175,8 @@ bool WindowSettings::apply(WindowSize next) {
         // saved after this WindowSettings instance was initialized.
         auto& window = settings["window"];
         if (!window.is_object()) window = Json::object();
-        window["width"] = next.width;
-        window["height"] = next.height;
+        window["bar_width"] = next.width;
+        window["bar_height"] = next.height;
         const auto contents = settings.dump(2) + "\n";
         if (contents.size() > max_settings_bytes) throw std::runtime_error("settings file would be too large");
         write_settings(directory_, contents);
@@ -171,6 +184,25 @@ bool WindowSettings::apply(WindowSize next) {
         return true;
     } catch (const std::exception&) {
         error_ = L"Could not save the window size. The previous size and settings were kept.";
+        return false;
+    }
+}
+
+bool WindowSettings::set_notes_collapsed(bool collapsed) {
+    error_.clear();
+    try {
+        auto settings = read_settings(directory_ / "settings.json");
+        auto& window = settings["window"];
+        if (!window.is_object()) window = Json::object();
+        window["notes_collapsed"] = collapsed;
+        const auto contents = settings.dump(2) + "\n";
+        if (contents.size() > max_settings_bytes) throw std::runtime_error("settings file would be too large");
+        write_settings(directory_, contents);
+        notes_collapsed_ = collapsed;
+        return true;
+    } catch (const std::exception&) {
+        notes_collapsed_ = collapsed; // Still honour the click for this session.
+        error_ = L"Could not save the notes panel setting.";
         return false;
     }
 }
