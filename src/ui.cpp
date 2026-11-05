@@ -2414,9 +2414,16 @@ private:
         const int full = full_width_ ? full_width_ : width;
         const bool collapsed = window_settings_.notes_collapsed();
         const int margin = px(10), gap = px(14);
-        const int tasks_w = column_width(full, 17, 220, 320);
-        const int notes_w = column_width(full, 17, 220, 320);
-        const int presence_w = column_width(full, 13, 190, 250);
+        int tasks_w = column_width(full, 17, 220, 320);
+        int notes_w = column_width(full, 17, 220, 320);
+        int presence_w = column_width(full, 13, 190, 250);
+        // On a narrow screen the side columns give way before the job cards do.
+        const int fixed = 2 * margin + 3 * gap + px(8) + px(28);
+        if (full - fixed - tasks_w - notes_w - presence_w < px(320)) {
+            tasks_w = std::max(px(170), (full - fixed - px(320)) * 34 / 100);
+            notes_w = collapsed ? notes_w : tasks_w;
+            presence_w = std::max(px(150), (full - fixed - px(320)) * 32 / 100);
+        }
         arrow_rect_ = RECT{width - px(24), 1, width - 1, height - 1};
         notes_rect_ = collapsed ? RECT{} : RECT{arrow_rect_.left - px(4) - notes_w, margin, arrow_rect_.left - px(4), height - margin};
         const int presence_right = collapsed ? arrow_rect_.left - gap : notes_rect_.left - gap;
