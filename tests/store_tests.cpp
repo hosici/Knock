@@ -1266,6 +1266,113 @@ void note_search_locations_are_trusted_and_complete() {
 }
 } // namespace
 
+
+std::set<std::string> keys(const Json& object) {
+    std::set<std::string> result;
+    for (const auto& [key, value] : object.items()) { (void)value; result.insert(key); }
+    return result;
+}
+
+void finished_inbox_marks_cards_and_tasks() {
+    Fixture f;
+    const auto by_operator = ok(f.store.handle({{"op", "task.add"}, {"title", "Polish the cards"}, {"operator", "ui-1"}}))["task"];
+    const auto by_title = ok(f.store.handle({{"op", "task.add"}, {"title", "UI-1: screenshots"}}))["task"];
+    const auto other = ok(f.store.handle({{"op", "task.add"}, {"title", "UI-10: unrelated"}, {"operator", "ME"}}))["task"];
+    const auto colored = std::string("\x1b[32mAll 12 checks passed.\x1b[0m\r\nNothing was committed.\x07\x1b]0;title\x07");
+    auto first = ok(f.store.handle({{"op", "done"}, {"chat", "UI-1"}, {"summary", colored}, {"report", "C:\\Reports\\ui.md"}}));
+    const auto record = first["done"];
+    check(keys(first) == std::set<std::string>{"ok", "done"}, "done returned unexpected fields");
+    check(record["status"] == "done" && record["chat"] == "UI-1" && record["report"] == "C:\\Reports\\ui.md",
+          "done record is incomplete");
+    check(record["summary"] == "All 12 checks passed.\nNothing was committed.", "terminal formatting survived: " + record.dump());
+    check(record["tasks_completed"] == Json::array({by_operator["id"], by_title["id"]}), "wrong tasks completed");
+    auto state = f.store.snapshot();
+    for (const auto& task : state["tasks"])
+        check((task["status"] == "done") == (task["id"] != other["id"]), "task matching changed the wrong task");
+
+    // Finishing again keeps one card, refreshes it and leaves completed tasks alone.
+    ok(f.store.handle({{"op", "done"}, {"chat", "OTHER"}, {"summary", "Second card"}}));
+    const auto again = ok(f.store.handle({{"op", "done"}, {"chat", "UI-1"}, {"summary", "Revised."}}))["done"];
+    check(again["id"] == record["id"] && again["report"] == "" && again["tasks_completed"].empty(), "repeat done did not update in place");
+    const auto listed = ok(f.store.handle({{"op", "list"}, {"collection", "inbox"}}));
+    check(listed["total"] == 2 && listed["items"][0]["id"] == record["id"] && listed["items"][0]["summary"] == "Revised.",
+          "inbox is not newest first: " + listed.dump());
+    check(ok(f.store.handle({{"op", "inbox.result"}, {"id", record["id"]}}))["done"]["summary"] == "Revised.", "inbox.result failed");
+
+    // An explicit task is used instead of matching.
+    const auto explicit_task = ok(f.store.handle({{"op", "task.add"}, {"title", "Unrelated title"}}))["task"];
+    const auto chosen = ok(f.store.handle({{"op", "done"}, {"chat", "OTHER"}, {"summary", "x"}, {"task", explicit_task["id"]}}))["done"];
+    check(chosen["tasks_completed"] == Json::array({explicit_task["id"]}), "explicit task was not completed");
+
+    const auto before = f.store.snapshot();
+    fails(f.store.handle({{"op", "done"}, {"chat", "UI-1"}}), "missing_field: summary");
+    fails(f.store.handle({{"op", "done"}, {"chat", "UI-1"}, {"summary", " \n "}}), "empty_field");
+    fails(f.store.handle({{"op", "done"}, {"chat", "UI-1"}, {"summary", "\x1b[0m"}}), "empty_field");
+    fails(f.store.handle({{"op", "done"}, {"chat", "UI-1"}, {"summary", "x"}, {"report", "a\nb"}}), "invalid_report_path");
+    fails(f.store.handle({{"op", "done"}, {"chat", "UI-1"}, {"summary", "x"}, {"task", "missing"}}), "not_found");
+    fails(f.store.handle({{"op", "done"}, {"chat", std::string(65, 'x')}, {"summary", "x"}}), "field_too_long");
+    check(f.store.snapshot() == before, "failed done changed state");
+
+    ok(f.store.handle({{"op", "item.dismiss"}, {"kind", "inbox"}, {"id", record["id"]}}));
+    check(ok(f.store.handle({{"op", "inbox.result"}, {"id", record["id"]}}))["done"]["archived"] == true, "dismiss did not archive");
+    const auto revived = ok(f.store.handle({{"op", "done"}, {"chat", "UI-1"}, {"summary", "Back."}}))["done"];
+    check(!revived.contains("archived"), "a new done stayed dismissed");
+    const auto saved = f.store.snapshot();
+    Store restarted(f.directory);
+    restarted.load();
+    check(restarted.snapshot()["inbox"] == saved["inbox"], "inbox did not survive restart");
+    restarted.stop();
+}
+
+void legacy_state_gains_an_empty_inbox() {
+    Fixture f;
+    f.store.stop();
+    auto state = Json::parse(read_file(f.directory / "state.json"));
+    state.erase("inbox");
+    write_file(f.directory / "state.json", state.dump());
+    Store restarted(f.directory);
+    restarted.load();
+    check(restarted.snapshot()["inbox"] == Json::array(), "legacy state did not gain an inbox");
+    check(Json::parse(read_file(f.directory / "state.json"))["inbox"] == Json::array(), "inbox migration was not saved");
+    auto broken = state;
+    broken["inbox"] = Json::array({{{"id", "x"}, {"chat", "A"}, {"status", "running"}, {"summary", "s"}, {"report", ""},
+                                    {"created_at", 1}, {"finished_at", 1}, {"updated_at", 1}}});
+    restarted.stop();
+    write_file(f.directory / "state.json", broken.dump());
+    Store invalid(f.directory);
+    bool threw = false;
+    try { invalid.load(); } catch (const std::exception&) { threw = true; }
+    check(threw, "invalid inbox record was accepted");
+}
+
+void existing_outputs_keep_their_shape() {
+    Fixture f;
+    const auto status = ok(f.store.handle({{"op", "status"}}));
+    check(keys(status) == std::set<std::string>{"ok", "requests_pending", "jobs_running", "tasks_todo", "notes", "lease", "presence"},
+          "status fields changed: " + status.dump());
+    check(keys(ok(f.store.handle({{"op", "presence.get"}}))) == std::set<std::string>{"ok", "presence"}, "presence fields changed");
+    const auto created = ok(f.store.handle({{"op", "request.create"}, {"chat", "A"}, {"message", "m"}}));
+    check(keys(created) == std::set<std::string>{"ok", "request", "presence"}, "request.create fields changed");
+    check(keys(created["request"]) == std::set<std::string>{"id", "chat", "message", "kind", "created_at", "expires_at",
+          "status", "response", "lease_seconds", "lease_until"}, "request record fields changed: " + created.dump());
+    const auto notice = ok(f.store.handle({{"op", "notify"}, {"chat", "A"}, {"message", "m"}}));
+    check(keys(notice) == std::set<std::string>{"ok", "job"} && keys(notice["job"]) == std::set<std::string>{"id", "chat", "title",
+          "command", "cwd", "log_path", "worker_pid", "created_at", "finished_at", "status", "exit_code", "output_tail",
+          "resume_text"}, "notify fields changed: " + notice.dump());
+    const auto task = ok(f.store.handle({{"op", "task.add"}, {"title", "t"}}));
+    check(keys(task["task"]) == std::set<std::string>{"id", "title", "body", "created_at", "updated_at", "operator", "project", "status"},
+          "task fields changed");
+    for (const auto* collection : {"jobs", "tasks", "notes", "requests"}) {
+        const auto page = ok(f.store.handle({{"op", "list"}, {"collection", collection}}));
+        check(keys(page) == std::set<std::string>{"ok", "items", "total", "next_offset"}, "list fields changed");
+    }
+    // The finished inbox is separate: done never adds jobs, requests or notices.
+    ok(f.store.handle({{"op", "done"}, {"chat", "A"}, {"summary", "s"}}));
+    check(ok(f.store.handle({{"op", "list"}, {"collection", "jobs"}}))["total"] == 1, "done created a job record");
+    check(ok(f.store.handle({{"op", "status"}})) == ok(f.store.handle({{"op", "status"}})) &&
+          keys(ok(f.store.handle({{"op", "status"}}))) == keys(status), "done changed status output");
+}
+
 int main() {
     const std::vector<std::pair<const char*, std::function<void()>>> tests = {
         {"fresh state and invalid input", fresh_state_and_validation},
@@ -1302,7 +1409,10 @@ int main() {
         {"message edit concurrency, validation, and rollback", message_edit_conflicts_validation_and_rollback},
         {"note search Unicode, paging, and stable locations", note_search_unicode_paging_and_locations},
         {"note search bounds and edited content", note_search_bounds_and_current_content},
-        {"complete GUI-only in-note search locations", note_search_locations_are_trusted_and_complete}
+        {"complete GUI-only in-note search locations", note_search_locations_are_trusted_and_complete},
+        {"finished inbox marks cards and tasks", finished_inbox_marks_cards_and_tasks},
+        {"legacy state gains an empty inbox", legacy_state_gains_an_empty_inbox},
+        {"existing command outputs keep their shape", existing_outputs_keep_their_shape}
     };
     int failures = 0;
     for (const auto& [name, test] : tests) {

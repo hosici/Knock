@@ -58,13 +58,64 @@ Json default_presence() {
 Json empty_state() {
     return {{"schema", 1}, {"requests", Json::array()}, {"jobs", Json::array()},
             {"tasks", Json::array()}, {"notes", Json::array()}, {"trash", Json::array()},
-            {"preferences", default_preferences()}, {"presence", default_presence()}, {"lease", nullptr}};
+            {"inbox", Json::array()}, {"preferences", default_preferences()}, {"presence", default_presence()}, {"lease", nullptr}};
 }
 
 bool has_text(const std::string& value) {
     return std::any_of(value.begin(), value.end(), [](unsigned char c) {
         return !std::isspace(c);
     });
+}
+
+// Agents often pipe colored terminal output into a summary. Keep the words and
+// line breaks, but drop escape sequences and other control characters so the
+// card and clipboard receive plain text.
+std::string plain_text(const std::string& value) {
+    std::string result;
+    result.reserve(value.size());
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        const auto c = static_cast<unsigned char>(value[i]);
+        if (c == 0x1B) {
+            if (i + 1 >= value.size()) break;
+            const auto kind = value[i + 1];
+            if (kind == '[') {
+                i += 2;
+                while (i < value.size() && !(static_cast<unsigned char>(value[i]) >= 0x40 &&
+                                             static_cast<unsigned char>(value[i]) <= 0x7E)) ++i;
+            } else if (kind == ']' || kind == 'P' || kind == '_' || kind == '^') {
+                i += 2;
+                while (i < value.size() && value[i] != '\a' &&
+                       !(value[i] == 0x1B && i + 1 < value.size() && value[i + 1] == '\\')) ++i;
+                if (i < value.size() && value[i] == 0x1B) ++i;
+            } else ++i;
+            continue;
+        }
+        if (c == '\r') {
+            result.push_back('\n');
+            if (i + 1 < value.size() && value[i + 1] == '\n') ++i;
+            continue;
+        }
+        if ((c < 0x20 && c != '\n' && c != '\t') || c == 0x7F) continue;
+        // C1 controls are two UTF-8 bytes: 0xC2 0x80..0x9F.
+        if (c == 0xC2 && i + 1 < value.size() && static_cast<unsigned char>(value[i + 1]) >= 0x80 &&
+            static_cast<unsigned char>(value[i + 1]) <= 0x9F) { ++i; continue; }
+        result.push_back(value[i]);
+    }
+    return result;
+}
+
+std::string ascii_lower(std::string value) {
+    for (auto& c : value) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    return value;
+}
+
+// A task belongs to a chat when its operator is the chat label, or its title
+// starts with "LABEL:". Comparison ignores ASCII case only.
+bool task_matches_chat(const Json& task, const std::string& chat) {
+    const auto label = ascii_lower(chat);
+    if (ascii_lower(task.value("operator", "")) == label) return true;
+    const auto title = ascii_lower(task.value("title", ""));
+    return title.size() > label.size() && title.starts_with(label) && title[label.size()] == ':';
 }
 
 std::string text_field(const Json& object, const char* field, std::size_t limit,
@@ -276,7 +327,7 @@ Json record_summary(const Json& record) {
 
 Json list_records(const Json& state, const Json& command) {
     const auto collection = text_field(command, "collection", 16, true);
-    if (!is_one_of(collection, {"requests", "jobs", "tasks", "notes", "trash"}))
+    if (!is_one_of(collection, {"requests", "jobs", "tasks", "notes", "trash", "inbox"}))
         throw std::runtime_error("invalid_collection");
     const auto offset = static_cast<std::uint64_t>(integer_field(command, "offset", 0, INT64_MAX, 0));
     const auto limit = static_cast<std::size_t>(integer_field(command, "limit", 1, 100, 50));
@@ -569,8 +620,9 @@ void validate_state(const Json& state) {
     if (state.contains("preferences")) validate_preferences(state["preferences"]);
     if (state.contains("presence")) validate_presence(state["presence"]);
     std::set<std::string> ids;
-    for (const auto* collection : {"requests", "jobs", "tasks", "notes", "trash"}) {
-        if (std::string_view(collection) == "trash" && !state.contains("trash")) continue;
+    for (const auto* collection : {"requests", "jobs", "tasks", "notes", "trash", "inbox"}) {
+        if ((std::string_view(collection) == "trash" || std::string_view(collection) == "inbox") &&
+            !state.contains(collection)) continue;
         if (!state.contains(collection) || !state[collection].is_array() ||
             state[collection].size() > max_records)
             throw std::runtime_error(std::string("invalid_collection: ") + collection);
@@ -601,6 +653,19 @@ void validate_state(const Json& state) {
                     throw std::runtime_error("inconsistent_pending_request");
                 if (record["kind"] == "question" && (record["lease_until"] != 0 || record["status"] == "released"))
                     throw std::runtime_error("inconsistent_question_lease");
+            } else if (category == "inbox") {
+                require_fields(record, {"chat", "status", "summary", "report", "finished_at", "updated_at"});
+                text_field(record, "chat", 64, true);
+                if (text_field(record, "status", 16, true) != "done") throw std::runtime_error("invalid_inbox_status");
+                text_field(record, "summary", 16000, true);
+                text_field(record, "report", 32768);
+                integer_field(record, "finished_at", 0, INT64_MAX, 0, true);
+                integer_field(record, "updated_at", 0, INT64_MAX, 0, true);
+                if (record.contains("tasks_completed")) {
+                    if (!record["tasks_completed"].is_array()) throw std::runtime_error("invalid_tasks_completed");
+                    for (const auto& task : record["tasks_completed"])
+                        if (!task.is_string()) throw std::runtime_error("invalid_tasks_completed");
+                }
             } else if (category == "jobs") {
                 require_fields(record, {"chat", "title", "command", "cwd", "log_path", "status", "exit_code", "output_tail", "resume_text"});
                 text_field(record, "chat", 64, true);
@@ -798,6 +863,7 @@ void Store::load() {
     }
     bool dirty = !exists;
     if (!loaded.contains("trash")) { loaded["trash"] = Json::array(); dirty = true; }
+    if (!loaded.contains("inbox")) { loaded["inbox"] = Json::array(); dirty = true; }
     if (!loaded.contains("preferences")) { loaded["preferences"] = default_preferences(); dirty = true; }
     if (!loaded.contains("presence")) { loaded["presence"] = default_presence(); dirty = true; }
     const auto defaults = default_preferences();
@@ -957,7 +1023,7 @@ Json Store::handle(const Json& command, bool trusted_ui) {
             }
         } else {
             if (expire_locked()) events.push_back(event("updated"));
-            const bool may_mutate = !is_one_of(op, {"snapshot", "status", "presence.get", "list", "request.result", "job.result", "note.get", "note.find_message", "note.message.get", "note.trash.list", "note.search", "note.search_locations"});
+            const bool may_mutate = !is_one_of(op, {"snapshot", "status", "presence.get", "list", "request.result", "job.result", "inbox.result", "note.get", "note.find_message", "note.message.get", "note.trash.list", "note.search", "note.search_locations"});
             Json previous = may_mutate ? state_ : Json();
             bool dirty = false;
             Json notification;
@@ -965,7 +1031,7 @@ Json Store::handle(const Json& command, bool trusted_ui) {
                 const auto now = now_ms();
                 if (op == "snapshot") {
                     Json snapshot = Json::object();
-                    for (const auto* field : {"schema", "requests", "jobs", "tasks", "lease", "preferences", "presence"})
+                    for (const auto* field : {"schema", "requests", "jobs", "tasks", "inbox", "lease", "preferences", "presence"})
                         snapshot[field] = state_[field];
                     snapshot["notes"] = Json::array();
                     for (const auto& note : state_["notes"])
@@ -1042,6 +1108,58 @@ Json Store::handle(const Json& command, bool trusted_ui) {
                     notification["operation"] = op;
                     trash.erase(std::find_if(trash.begin(), trash.end(), [&](const Json& item) { return item["id"] == id; }));
                     result = {{"ok", true}};
+                    dirty = true;
+                } else if (op == "inbox.result") {
+                    result = {{"ok", true}, {"done", find_record(state_["inbox"], id_field(command))}};
+                } else if (op == "done") {
+                    // One card per chat: finishing again replaces the summary and
+                    // moves the record to the newest position.
+                    const auto chat = text_field(command, "chat", 64, true);
+                    const auto summary = plain_text(text_field(command, "summary", 16000, true));
+                    if (!has_text(summary)) throw std::runtime_error("empty_field: summary");
+                    const auto report = text_field(command, "report", 32768);
+                    if (std::any_of(report.begin(), report.end(), [](unsigned char c) { return c < 0x20 || c == 0x7F; }))
+                        throw std::runtime_error("invalid_report_path");
+                    Json completed = Json::array();
+                    auto& tasks = state_["tasks"];
+                    if (command.contains("task")) {
+                        auto& task = find_record(tasks, id_field(Json{{"id", command["task"]}}));
+                        if (task["status"] != "done") {
+                            task["status"] = "done";
+                            task["updated_at"] = now;
+                            completed.push_back(task["id"]);
+                        }
+                    } else {
+                        for (auto& task : tasks) {
+                            if (task["status"] != "done" && task_matches_chat(task, chat)) {
+                                task["status"] = "done";
+                                task["updated_at"] = now;
+                                completed.push_back(task["id"]);
+                            }
+                        }
+                    }
+                    auto& inbox = state_["inbox"];
+                    const auto existing = std::find_if(inbox.begin(), inbox.end(),
+                        [&](const Json& item) { return item["chat"] == chat; });
+                    Json record;
+                    if (existing != inbox.end()) {
+                        record = *existing;
+                        inbox.erase(existing);
+                    } else {
+                        room_for_record(inbox);
+                        record = {{"id", make_id()}, {"chat", chat}, {"created_at", now}};
+                    }
+                    record["status"] = "done";
+                    record["summary"] = summary;
+                    record["report"] = report;
+                    record["finished_at"] = now;
+                    record["updated_at"] = now;
+                    record["tasks_completed"] = completed;
+                    record.erase("archived");
+                    inbox.push_back(record);
+                    result = {{"ok", true}, {"done", record}};
+                    notification = event("done", &record, summary);
+                    notification["title"] = chat;
                     dirty = true;
                 } else if (op == "job.result") {
                     result = {{"ok", true}, {"job", find_record(state_["jobs"], id_field(command))}};
@@ -1323,8 +1441,9 @@ Json Store::handle(const Json& command, bool trusted_ui) {
                     dirty = true;
                 } else if (op == "item.dismiss") {
                     const auto kind = text_field(command, "kind", 16, true);
-                    if (!is_one_of(kind, {"request", "job"})) throw std::runtime_error("invalid_item_kind");
-                    auto& record = find_record(state_[kind == "request" ? "requests" : "jobs"], id_field(command));
+                    if (!is_one_of(kind, {"request", "job", "inbox"})) throw std::runtime_error("invalid_item_kind");
+                    auto& record = find_record(state_[kind == "request" ? "requests" : kind == "job" ? "jobs" : "inbox"],
+                                               id_field(command));
                     if (record["status"] == "pending" || record["status"] == "running")
                         throw std::runtime_error("item_still_active");
                     record["archived"] = true;
