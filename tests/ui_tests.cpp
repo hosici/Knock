@@ -110,7 +110,7 @@ HWND button(HWND root, const wchar_t* caption) {
 }
 
 void click(HWND control) {
-    require(IsWindowEnabled(control), "Cannot click a disabled control");
+    require(IsWindowEnabled(control), "Cannot click a disabled control: " + knock::narrow(window_text(control)));
     const auto caption = knock::narrow(window_text(control));
     try { message(control, BM_CLICK); }
     catch (const std::exception& error) {
@@ -123,6 +123,22 @@ void enter(HWND control) {
             "Could not post Enter to the chosen test control");
 }
 
+// Notes and tasks are drawn lists; their window text names the rows in order.
+std::wstring note_list(HWND root) { return window_text(GetDlgItem(root, 62)); }
+std::wstring task_list(HWND root) { return window_text(GetDlgItem(root, 61)); }
+bool lists(const std::wstring& text, const std::wstring& title) {
+    return text.find(L": " + title) != std::wstring::npos || text.find(L"| " + title) != std::wstring::npos;
+}
+void open_note(HWND root, const std::wstring& title) {
+    set_text(edit(root, 30), L"/find-note " + title);
+    enter(edit(root, 30));
+    eventually([&] { return edit(root, 51) && IsWindowVisible(edit(root, 51)); }, "find page opens");
+    enter(edit(root, 51));
+    eventually([&] { return edit(root, 37) != nullptr; }, "note opens from /find-note");
+}
+void open_first_task(HWND root) {
+    require(PostMessageW(GetDlgItem(root, 61), WM_LBUTTONUP, 0, MAKELPARAM(12, 12)) != 0, "Cannot click the task list");
+}
 void require_no_run_buttons(HWND root) {
     for (HWND control : buttons(root, L""))
         require(!window_text(control).starts_with(L"run /"), "A command-labelled add button remains in the interface");
@@ -333,7 +349,7 @@ struct Application {
             GetWindowThreadProcessId(candidate, &owner);
             require(owner == process_id, "A different Knock process appeared; refusing to control it");
             root = candidate;
-            return IsWindowVisible(root) && buttons(root, L"Notes").size() == 1;
+            return IsWindowVisible(root) && buttons(root, L"AT PC").size() == 1;
         }, "tray window startup");
         eventually([&] {
             try { return knock::send_command({{"op", "snapshot"}}, false).value("ok", false); }
@@ -392,10 +408,9 @@ int main() {
         const auto extended = GetWindowLongPtrW(app.root, GWL_EXSTYLE);
         require((extended & WS_EX_TOOLWINDOW) && !(extended & WS_EX_APPWINDOW), "Popup can appear in the taskbar");
         require(!(style & WS_CAPTION) && !(style & WS_SYSMENU) && !(style & WS_MINIMIZEBOX), "Popup has window chrome");
-        const auto notification_tab = button(app.root, L"Notifications");
-        const auto task_tab = button(app.root, L"Task List");
-        const auto note_tab = button(app.root, L"Notes");
-        const auto tab_bounds = screen_rect(notification_tab);
+        const auto status_button = button(app.root, L"AT PC");
+        const auto notes_toggle = button(app.root, L"HIDE NOTES");
+        const auto status_bounds = screen_rect(status_button);
         passed("tray popup uses toolwindow style with no taskbar or caption");
         const auto original_window = app.root;
         message(app.root, WM_CLOSE);
@@ -431,9 +446,9 @@ int main() {
 
         const auto content = FindWindowExW(app.root, nullptr, L"Knock.Content.v1", nullptr);
         require(content != nullptr, "App content window is missing");
-        for (HWND source : {app.root, content, note_tab}) {
+        for (HWND source : {app.root, content, status_button}) {
             open_settings(app.root, source);
-            require(window_text(edit(app.root, 41)) == L"420" && window_text(edit(app.root, 42)) == L"510",
+            require(window_text(edit(app.root, 41)) == L"1720" && window_text(edit(app.root, 42)) == L"380",
                     "Settings did not show the default window dimensions");
             require(buttons(app.root, L"CHANGE").size() == 1 && buttons(app.root, L"APPLY").size() == 1 &&
                     buttons(app.root, L"RESET").size() == 1 &&
@@ -442,9 +457,9 @@ int main() {
                     "Settings is missing its shortcut, size, or startup controls");
             back_from_settings(app.root);
         }
-        require(button(app.root, L"Notifications") == notification_tab && button(app.root, L"Notes") == note_tab,
-                "Opening Settings recreated terminal tabs");
-        passed("native context menus on the popup, content background, and terminal tab open Settings");
+        require(button(app.root, L"AT PC") == status_button && button(app.root, L"HIDE NOTES") == notes_toggle,
+                "Opening Settings recreated the status or notes controls");
+        passed("native context menus on the bar, content background, and a button open Settings");
 
         const auto settings_path = app.directory / L"settings.json";
         const auto preferences = [&] {
@@ -456,7 +471,7 @@ int main() {
         const auto width_edit = edit(app.root, 41);
         const auto height_edit = edit(app.root, 42);
         for (const auto& [width, height] : std::array<std::pair<std::wstring, std::wstring>, 3>{
-                 {{L"", L"620"}, {L"359", L"620"}, {L"500", L"1001"}}}) {
+                 {{L"", L"400"}, {L"899", L"400"}, {L"1200", L"801"}}}) {
             set_text(width_edit, width);
             set_text(height_edit, height);
             click(button(app.root, L"APPLY"));
@@ -465,40 +480,40 @@ int main() {
             require(window_text(width_edit) == width && window_text(height_edit) == height,
                     "Validation discarded the dimensions being corrected");
         }
-        set_text(width_edit, L"500");
-        set_text(height_edit, L"620");
+        set_text(width_edit, L"1200");
+        set_text(height_edit, L"400");
         click(button(app.root, L"APPLY"));
-        require(preferences().at("window") == Json{{"width", 500}, {"height", 620}} &&
+        require(preferences().at("window") == Json{{"bar_width", 1200}, {"bar_height", 400}} &&
                 !same_rect(original_size, screen_rect(app.root)),
                 "Apply did not save and display the chosen window size");
-        set_text(width_edit, L"615");
-        set_text(height_edit, L"630");
+        set_text(width_edit, L"1215");
+        set_text(height_edit, L"430");
         const auto dimensions_focus = focus_of(app.root);
         const auto settings_notice = send({{"op", "notify"}, {"chat", "GUI-SETTINGS"},
                                           {"message", "Incoming state while dimensions are being edited."}}).at("job");
         std::this_thread::sleep_for(200ms);
         message(app.root, WM_NULL);
         require(edit(app.root, 41) == width_edit && edit(app.root, 42) == height_edit &&
-                window_text(width_edit) == L"615" && window_text(height_edit) == L"630",
+                window_text(width_edit) == L"1215" && window_text(height_edit) == L"430",
                 "An incoming state update replaced pending Settings fields");
         require(focus_of(app.root) == dimensions_focus, "An incoming state update changed Settings focus");
         send({{"op", "item.dismiss"}, {"kind", "job"}, {"id", settings_notice["id"]}});
         back_from_settings(app.root);
         open_settings(app.root, content);
-        require(window_text(edit(app.root, 41)) == L"500" && window_text(edit(app.root, 42)) == L"620",
+        require(window_text(edit(app.root, 41)) == L"1200" && window_text(edit(app.root, 42)) == L"400",
                 "Reopening Settings did not use the last applied dimensions");
         passed("Settings validates dimensions, applies the size, and preserves pending inputs through incoming state");
 
         const auto saved_size_preferences = preferences();
         const auto pending_width = edit(app.root, 41);
-        set_text(pending_width, L"615");
+        set_text(pending_width, L"1215");
         auto shortcut = shortcut_dialog(app.root);
         click(button(shortcut, L"DISABLE"));
         require(window_text(GetDlgItem(shortcut, 101)) == L"Disabled", "Disable did not update the shortcut draft");
         click(button(shortcut, L"CANCEL"));
         eventually([&] { return !IsWindow(shortcut) && IsWindowEnabled(app.root); }, "Cancel returns to Settings");
         require(preferences() == saved_size_preferences && edit(app.root, 41) == pending_width &&
-                window_text(pending_width) == L"615",
+                window_text(pending_width) == L"1215",
                 "Cancel saved a shortcut change or replaced pending dimensions");
         shortcut = shortcut_dialog(app.root);
         click(button(shortcut, L"DISABLE"));
@@ -508,9 +523,9 @@ int main() {
                 preferences().at("window") == saved_size_preferences.at("window"),
                 "Shortcut Save failed or changed the window preferences");
         click(button(app.root, L"RESET"));
-        require(window_text(edit(app.root, 41)) == L"420" && window_text(edit(app.root, 42)) == L"510" &&
+        require(window_text(edit(app.root, 41)) == L"1720" && window_text(edit(app.root, 42)) == L"380" &&
                 same_rect(original_size, screen_rect(app.root)) &&
-                preferences().at("window") == Json{{"width", 420}, {"height", 510}} &&
+                preferences().at("window") == Json{{"bar_width", 1720}, {"bar_height", 380}} &&
                 !preferences().at("shortcut").at("enabled").get<bool>(),
                 "Reset did not restore the default size while keeping the shortcut preference");
         const auto expected_preferences = preferences();
@@ -528,6 +543,7 @@ int main() {
         require(state()["lease"].is_null(), "No granted an input lease");
         archive(denied);
         eventually([&] { return buttons(app.root, L"DISMISS").empty(); }, "denial archived");
+        eventually([&] { return buttons(app.root, L"NO").empty(); }, "answered request card leaves");
 
         auto custom = create_request("GUI-CUSTOM");
         eventually([&] { return buttons(app.root, L"CUSTOM").size() == 1; }, "custom answer button");
@@ -567,10 +583,10 @@ int main() {
         eventually([&] { return state()["lease"].is_null(); }, "second lease release");
         archive(first);
         archive(second);
-        require(button(app.root, L"Notifications") == notification_tab && button(app.root, L"Task List") == task_tab &&
-                button(app.root, L"Notes") == note_tab && same_rect(tab_bounds, screen_rect(notification_tab)),
-                "State updates recreated or moved the tab controls");
-        passed("GUI Yes, exclusive lease disable, release, and stable tab controls");
+        require(button(app.root, L"AT PC") == status_button && button(app.root, L"HIDE NOTES") == notes_toggle &&
+                same_rect(status_bounds, screen_rect(status_button)),
+                "State updates recreated or moved the status controls");
+        passed("GUI Yes, exclusive lease disable, release, and stable status controls");
 
         const std::string continuation = "@COPY-1: the build finished.\r\nReview job 123 and continue — 日本語 ✓";
         const auto notice = send({{"op", "notify"}, {"chat", "COPY-1"}, {"message", "Build finished; copy the continuation."},
@@ -582,8 +598,7 @@ int main() {
         eventually([&] { return buttons(app.root, L"COPY").empty(); }, "copied notification archived");
         passed("actual Copy button publishes the exact Unicode continuation to the clipboard");
 
-        click(note_tab);
-        eventually([&] { return edit(app.root, 30) != nullptr; }, "notes footer");
+        eventually([&] { return edit(app.root, 30) != nullptr; }, "notes search");
         require_no_run_buttons(app.root);
         set_text(edit(app.root, 30), L"Working note");
         enter(edit(app.root, 30));
@@ -669,15 +684,13 @@ int main() {
                 "Description save lost full text, external tags, or conversation history");
         require(edit(app.root, 37) == composer && window_text(composer) == external_draft,
                 "Editing metadata lost the unsent conversation draft");
-        click(task_tab);
-        eventually([&] { return edit(app.root, 30) != nullptr; }, "task list after draft");
-        click(note_tab);
-        eventually([&] { return buttons(app.root, L"Working note").size() == 1; }, "working conversation card");
-        click(button(app.root, L"Working note"));
-        eventually([&] { return edit(app.root, 37) != nullptr; }, "reopened unsent conversation");
+        click(button(app.root, L"< BACK"));
+        eventually([&] { return edit(app.root, 37) == nullptr && lists(note_list(app.root), L"Working note"); },
+                   "back to the cards with the note listed");
+        open_note(app.root, L"Working note");
         composer = edit(app.root, 37);
         require(window_text(composer) == external_draft && saved_note(working_id)["messages"] == working_messages,
-                "Tab switch lost a draft or implicitly sent it");
+                "Leaving the note lost a draft or implicitly sent it");
         message(app.root, WM_CLOSE);
         eventually([&] { return !IsWindowVisible(app.root); }, "hide with a conversation draft");
         message(app.root, WM_APP + 20);
@@ -689,7 +702,7 @@ int main() {
         eventually([&] { return edit(app.root, 32) != nullptr; }, "reopened full description");
         require(window_text(edit(app.root, 32)) == description, "Opening metadata loaded a truncated snapshot preview");
         click(button(app.root, L"EDIT"));
-        passed("external tags, metadata, tabs, and hide preserve the unsent draft and existing message IDs");
+        passed("external tags, metadata, navigation, and hide preserve the unsent draft and existing message IDs");
 
         click(button(app.root, L"EDIT"));
         eventually([&] { return edit(app.root, 31) && edit(app.root, 32); }, "metadata for cleared-title regression");
@@ -731,7 +744,7 @@ int main() {
                 edit(app.root, 37) == composer && window_text(composer) == external_draft &&
                 focus_of(app.root) == empty_title_edit,
                 "Back from Settings replaced the cleared title, pending description, composer, or focus");
-        click(note_tab);
+        click(button(app.root, L"< BACK"));
         require(edit(app.root, 31) == empty_title_edit && window_text(empty_title_edit).empty() &&
                 window_text(pending_body_edit) == pending_description,
                 "Navigation discarded unfinished metadata after validation failed");
@@ -805,8 +818,8 @@ int main() {
 
         const auto unrelated = send({{"op", "note.add"}, {"title", "Untagged personal note"},
                                      {"body", "A separate note for checking the tag filter."}}).at("note");
-        eventually([&] { return buttons(app.root, L"Untagged personal note").size() == 1; }, "second note card");
-        click(button(app.root, L"FILTER"));
+        eventually([&] { return lists(note_list(app.root), L"Untagged personal note"); }, "second note listed");
+        click(button(app.root, L"#"));
         eventually([&] { return edit(app.root, 36) != nullptr; }, "notes tag filter query");
         set_text(edit(app.root, 36), custom_tag);
         // Post Enter through the app's main message loop, where keyboard
@@ -814,36 +827,53 @@ int main() {
         require(PostMessageW(edit(app.root, 36), WM_KEYDOWN, VK_RETURN, 0) != 0,
                 "Could not submit the tag filter");
         eventually([&] {
-            return !edit(app.root, 36) && buttons(app.root, L"Persistent note").size() == 1 &&
-                   buttons(app.root, L"Untagged personal note").empty();
+            return !edit(app.root, 36) && lists(note_list(app.root), L"Persistent note") &&
+                   !lists(note_list(app.root), L"Untagged personal note");
         }, "Unicode tag filter shows only its matching note");
-        click(button(app.root, L"FILTER"));
+        click(button(app.root, L"#"));
         eventually([&] { return buttons(app.root, L"All notes").size() == 1; }, "reset tag filter option");
         click(button(app.root, L"All notes"));
         eventually([&] {
-            return buttons(app.root, L"Persistent note").size() == 1 &&
-                   buttons(app.root, L"Untagged personal note").size() == 1;
-        }, "All notes restores both cards");
-        click(button(app.root, L"FILTER"));
+            return lists(note_list(app.root), L"Persistent note") &&
+                   lists(note_list(app.root), L"Untagged personal note");
+        }, "All notes restores both notes");
+        click(button(app.root, L"#"));
         eventually([&] { return buttons(app.root, L"Untagged").size() == 1; }, "untagged filter option");
         click(button(app.root, L"Untagged"));
         eventually([&] {
-            return buttons(app.root, L"Persistent note").empty() &&
-                   buttons(app.root, L"Untagged personal note").size() == 1;
+            return !lists(note_list(app.root), L"Persistent note") &&
+                   lists(note_list(app.root), L"Untagged personal note");
         }, "untagged filter excludes tagged notes");
-        click(button(app.root, L"FILTER"));
+        click(button(app.root, L"#"));
         eventually([&] { return buttons(app.root, L"All notes").size() == 1; }, "clear untagged filter");
         click(button(app.root, L"All notes"));
         require(saved_note(unrelated["id"].get<std::string>())["tags"].empty(), "Filtering modified an untagged note");
         passed("note list filters by a Unicode tag or untagged state and resets to all notes");
 
-        click(task_tab);
-        eventually([&] { return edit(app.root, 30) != nullptr; }, "task footer");
-        set_text(edit(app.root, 30), L"Interface regression task");
+        set_text(edit(app.root, 30), L"untagged PERSONAL");
+        eventually([&] { return note_list(app.root) == L"Notes: Untagged personal note"; }, "search narrows the notes list");
+        set_text(edit(app.root, 30), L"");
+        eventually([&] { return lists(note_list(app.root), L"Persistent note"); }, "clearing search restores the list");
+        const auto wide = screen_rect(app.root);
+        click(button(app.root, L"HIDE NOTES"));
+        eventually([&] { return buttons(app.root, L"SHOW NOTES").size() == 1 && !IsWindowVisible(GetDlgItem(app.root, 62)); },
+                   "the arrow collapses the notes column");
+        const auto narrow = screen_rect(app.root);
+        require(narrow.right - narrow.left < wide.right - wide.left && narrow.top == wide.top,
+                "Collapsing notes did not narrow the bar in place");
+        require(preferences().at("window").at("notes_collapsed") == true, "Collapsed notes were not remembered");
+        click(button(app.root, L"SHOW NOTES"));
+        eventually([&] { return IsWindowVisible(GetDlgItem(app.root, 62)) && same_rect(wide, screen_rect(app.root)); },
+                   "the arrow brings the notes column back");
+        require(preferences().at("window").at("notes_collapsed") == false, "Shown notes were not remembered");
+        passed("notes search filters titles; the arrow collapses and restores the notes column");
+
+        eventually([&] { return edit(app.root, 38) != nullptr; }, "new task field");
+        set_text(edit(app.root, 38), L"Interface regression task");
         require_no_run_buttons(app.root);
-        enter(edit(app.root, 30));
-        eventually([&] { return buttons(app.root, L"Interface regression task").size() == 1; }, "new task card");
-        click(button(app.root, L"Interface regression task"));
+        enter(edit(app.root, 38));
+        eventually([&] { return lists(task_list(app.root), L"Interface regression task"); }, "new task listed");
+        open_first_task(app.root);
         eventually([&] { return edit(app.root, 33) && edit(app.root, 34); }, "task metadata editors");
         set_text(edit(app.root, 32), L"Native GUI regression coverage");
         set_text(edit(app.root, 33), L"GUI-1");
@@ -878,15 +908,14 @@ int main() {
         app.close();
         app.launch();
         require(state() == before_restart, "Normal quit and relaunch changed persisted data");
-        require(preferences() == expected_preferences, "Restart changed saved window or shortcut preferences");
+        auto expected_after_toggle = expected_preferences;
+        expected_after_toggle["window"]["notes_collapsed"] = false;
+        require(preferences() == expected_after_toggle, "Restart changed saved window or shortcut preferences");
         open_settings(app.root, app.root);
-        require(window_text(edit(app.root, 41)) == L"420" && window_text(edit(app.root, 42)) == L"510",
+        require(window_text(edit(app.root, 41)) == L"1720" && window_text(edit(app.root, 42)) == L"380",
                 "Restart did not load the saved dimensions into Settings");
         back_from_settings(app.root);
-        click(button(app.root, L"Notes"));
-        eventually([&] { return buttons(app.root, L"Persistent note").size() == 1; }, "persisted note card");
-        click(button(app.root, L"Persistent note"));
-        eventually([&] { return edit(app.root, 37) != nullptr; }, "persisted conversation composer");
+        open_note(app.root, L"Persistent note");
         require(window_text(edit(app.root, 37)) == restart_draft,
                 "Restored unsent draft differs from its exact text");
         require(saved_note(persistent_id)["messages"] == persistent_messages,
@@ -924,10 +953,7 @@ int main() {
             require(static_cast<bool>(stale), "Cannot prepare the stale committed-draft fixture");
         }
         app.launch();
-        click(button(app.root, L"Notes"));
-        eventually([&] { return buttons(app.root, L"Persistent note").size() == 1; }, "stale-draft note card");
-        click(button(app.root, L"Persistent note"));
-        eventually([&] { return edit(app.root, 37) != nullptr; }, "stale-draft recovery composer");
+        open_note(app.root, L"Persistent note");
         require(window_text(edit(app.root, 37)).empty() && saved_note(persistent_id)["messages"] == restored,
                 "A committed stale draft was restored as unsent content or duplicated in history");
         require(!std::filesystem::exists(persistent_draft_path), "Committed stale draft was not consumed");

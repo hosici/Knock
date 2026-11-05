@@ -113,17 +113,31 @@ void open_settings(HWND root) {
     }, {VK_HOME, VK_RETURN});
     eventually([&] { return edit(root, 41) && edit(root, 42); }, "Settings opens");
 }
-void open_presence(HWND root) {
-    HWND status = nullptr;
-    for (const auto* caption : {L"SET STATUS", L"AT PC", L"AWAY", L"BUSY"}) {
-        const auto matches = find(root, L"BUTTON", caption);
-        if (matches.empty()) continue;
-        require(!status && matches.size() == 1, "Presence strip is ambiguous");
-        status = matches.front();
+// Status has its own column: three choices and a message box (edit 45).
+void require_presence_column(HWND root) {
+    for (const auto* caption : {L"AT PC", L"AWAY", L"BUSY"}) button(root, caption);
+    require(edit(root, 45) != nullptr, "Status message box is missing");
+}
+// Cards are ordered left to right; this picks a card's button by position.
+HWND leftmost(HWND root, const std::wstring& caption) {
+    auto matches = find(root, L"BUTTON", caption);
+    require(!matches.empty(), "No button: " + knock::narrow(caption));
+    return *std::min_element(matches.begin(), matches.end(), [](HWND a, HWND b) {
+        RECT ra{}, rb{}; GetWindowRect(a, &ra); GetWindowRect(b, &rb); return ra.left < rb.left;
+    });
+}
+std::wstring clipboard_text() {
+    std::wstring value;
+    for (int attempt = 0; attempt < 50 && value.empty(); ++attempt) {
+        if (OpenClipboard(nullptr)) {
+            if (HANDLE data = GetClipboardData(CF_UNICODETEXT)) {
+                if (auto* text = static_cast<const wchar_t*>(GlobalLock(data))) { value = text; GlobalUnlock(data); }
+            }
+            CloseClipboard();
+        }
+        if (value.empty()) std::this_thread::sleep_for(20ms);
     }
-    require(status != nullptr, "Presence strip is missing");
-    click(status);
-    eventually([&] { return edit(root, 45); }, "Presence editor opens");
+    return value;
 }
 void back(HWND root) { click(button(root, L"< BACK")); }
 Json send(const Json& request) {
@@ -214,7 +228,7 @@ struct Application {
             if (!root) return false;
             DWORD actual = 0; GetWindowThreadProcessId(root, &actual);
             require(actual == pid, "Refusing to control another app's window");
-            return IsWindowVisible(root) && find(root, L"BUTTON", L"Notifications").size() == 1;
+            return IsWindowVisible(root) && find(root, L"BUTTON", L"AT PC").size() == 1;
         }, "application startup");
         eventually([&] { try { return knock::send_command({{"op", "status"}}, false).value("ok", false); } catch (...) { return false; } }, "IPC startup");
         // Pin this test popup through the app's own hotkey message. No global
@@ -258,9 +272,7 @@ int main() {
                                                             {"message", "Out for coffee"}}, false);
         require(!forbidden_presence.value("ok", true) && presence() == initial_presence,
                 "IPC changed the manual presence status");
-        open_presence(app.root);
-        require(!IsWindowEnabled(button(app.root, L"SAVE")), "An unset presence can be saved without a choice");
-        click(button(app.root, L"AWAY"));
+        require_presence_column(app.root);
         const auto presence_editor = edit(app.root, 45);
         const std::wstring coffee = L"Out for coffee — café 日本語. Continue with headless tests.";
         set_text(presence_editor, coffee);
@@ -272,29 +284,20 @@ int main() {
         message(presence_editor, WM_CHAR, VK_BACK);
         require(edit(app.root, 45) == presence_editor && text(presence_editor) == coffee &&
                 gui(app.root).hwndFocus == presence_editor && presence() == initial_presence,
-                "Incoming request replaced or silently saved the presence draft");
-        click(button(app.root, L"SAVE"));
-        eventually([&] { return !edit(app.root, 45) && find(app.root, L"BUTTON", L"AWAY").size() == 1; },
-                   "saved presence returns to the inbox");
+                "Incoming request replaced the message, or a message was saved without a status");
+        click(button(app.root, L"AWAY"));
         const auto away = presence();
         require(away.at("state") == "away" && away.at("message") == knock::narrow(coffee) &&
                 away.at("updated_at").get<std::int64_t>() > 0, "Unicode status was not saved exactly");
         require(result(availability_request).at("status") == "pending" && state().at("lease").is_null() &&
                 preferences() == defaults, "Presence changed a permission or notification preference");
         capture(app.root, app.directory / L"presence-away.bmp");
-        passed("manual presence is GUI-only, saves Unicode, and preserves requests and editor focus");
+        passed("manual presence is GUI-only, saves Unicode with one click, and preserves requests and editor focus");
 
-        open_presence(app.root);
-        click(button(app.root, L"BUSY"));
-        set_text(edit(app.root, 45), L"Unsaved status change");
-        back(app.root);
-        require(presence() == away && find(app.root, L"BUTTON", L"AWAY").size() == 1,
-                "Back saved the presence draft");
-        open_presence(app.root);
         const auto clear_editor = edit(app.root, 45);
         set_text(clear_editor, std::wstring(251, L'é'));
-        click(button(app.root, L"SAVE"));
-        require(edit(app.root, 45) == clear_editor && text(clear_editor) == std::wstring(251, L'é') && presence() == away,
+        click(button(app.root, L"BUSY"));
+        require(text(clear_editor) == std::wstring(251, L'é') && presence() == away,
                 "Oversized UTF-8 status was accepted or its draft was discarded");
         set_text(clear_editor, L"");
         focus_editor(clear_editor);
@@ -305,12 +308,13 @@ int main() {
         message(clear_editor, WM_CHAR, VK_BACK);
         require(edit(app.root, 45) == clear_editor && text(clear_editor).empty() && gui(app.root).hwndFocus == clear_editor,
                 "Cleared status text reappeared or lost focus after an incoming result");
-        click(button(app.root, L"SAVE"));
-        require(presence().at("state") == "away" && presence().at("message") == "", "Clearing the status was not persisted");
+        message(clear_editor, WM_KEYDOWN, VK_RETURN);
+        eventually([&] { return presence().at("message") == ""; }, "Enter saves the cleared message");
+        require(presence().at("state") == "away", "Saving the message changed the status");
         send({{"op", "request.cancel"}, {"id", availability_request.at("id")}});
         send({{"op", "item.dismiss"}, {"kind", "request"}, {"id", availability_request.at("id")}});
         send({{"op", "item.dismiss"}, {"kind", "job"}, {"id", clear_event.at("id")}});
-        passed("Back discards status edits; UTF-8 limits and clearing survive incoming events");
+        passed("UTF-8 limits, clearing with Enter, and incoming events never overwrite a status message");
 
         open_settings(app.root);
         click(button(app.root, L"MORE >"));
@@ -319,18 +323,18 @@ int main() {
         require(deadline > knock::now_ms() + 14 * 60000 && deadline <= knock::now_ms() + 15 * 60000,
                 "15-minute busy menu used the wrong deadline");
         back(app.root); back(app.root);
-        require(find(app.root, L"BUTTON", L"END").size() == 1, "Busy strip is missing");
+        require(find(app.root, L"BUTTON", L"END").size() == 1, "Quiet line is missing");
         const auto first = request("AUDIO-1");
         eventually([&] { return find(app.root, L"BUTTON", L"CUSTOM").size() == 1; }, "request arrives during busy mode");
         click(button(app.root, L"CUSTOM"));
-        button_menu(app.root, L"SAVED REPLIES", {VK_HOME, VK_RETURN});
+        button_menu(app.root, L"SAVED", {VK_HOME, VK_RETURN});
         const auto reply = edit(app.root, 35);
         require(reply && text(reply) == knock::widen(defaults["saved_replies"][0].get<std::string>()), "Preset did not fill composer");
         require(result(first).at("status") == "pending" && state().at("lease").is_null(), "Selecting a preset granted permission");
         const std::wstring custom = L"I'm busy — finish the headless tests first. Café 日本語.";
         set_text(reply, custom);
         notice("BUILD-1");
-        eventually([&] { return find(app.root, L"BUTTON", L"@BUILD-1").size() == 1; }, "incoming build update");
+        eventually([&] { return find(app.root, L"BUTTON", L"COPY").size() == 1; }, "incoming build update");
         require(edit(app.root, 35) == reply && text(reply) == custom && gui(app.root).hwndFocus == reply,
                 "Incoming update replaced the custom reply or its focus");
         capture(app.root, app.directory / L"saved-reply.bmp");
@@ -341,25 +345,30 @@ int main() {
 
         const auto pending = request("UI-3");
         notice("BUILD-2");
-        eventually([&] { return find(app.root, L"BUTTON", L"@BUILD-2").size() == 1; }, "newer completed notice");
-        require(bounds(button(app.root, L"@UI-3")).top < bounds(button(app.root, L"@BUILD-2")).top,
-                "A newer completion pushed a pending question below it");
-        click(button(app.root, L"@AUDIO-1"));
-        require(find(app.root, L"BUTTON", L"@AUDIO-1").size() == 1 && find(app.root, L"BUTTON", L"@UI-3").empty() &&
-                find(app.root, L"BUTTON", L"@BUILD-2").empty(), "Chat label did not filter the inbox");
-        click(button(app.root, L"ALL CHATS"));
-        require(find(app.root, L"BUTTON", L"@UI-3").size() == 1 && find(app.root, L"BUTTON", L"@BUILD-2").size() == 1,
-                "All chats did not restore the inbox");
-        button_menu(app.root, L"CHATS", {VK_HOME, VK_DOWN, VK_RETURN});
-        require(find(app.root, L"BUTTON", L"@AUDIO-1").size() == 1 && find(app.root, L"BUTTON", L"@UI-3").empty(),
-                "Chat selector did not select the first alphabetical chat");
-        click(button(app.root, L"ALL CHATS"));
+        eventually([&] { return find(app.root, L"BUTTON", L"COPY").size() == 2 && find(app.root, L"BUTTON", L"YES").size() == 1; },
+                   "waiting card and newer notice");
+        require(bounds(button(app.root, L"YES")).left < bounds(leftmost(app.root, L"COPY")).left,
+                "A newer completion pushed a waiting card after it");
+        send({{"op", "done"}, {"chat", "BUILD-2"}, {"summary", "Both builds passed.\nNothing was committed."},
+              {"report", "C:\\Reports\\build-2.md"}});
+        eventually([&] { return find(app.root, L"BUTTON", L"COPY REPORT").size() == 1 && find(app.root, L"BUTTON", L"COPY").size() == 1; },
+                   "the finished job's card turns to DONE");
+        click(button(app.root, L"COPY REPORT"));
+        eventually([&] { return clipboard_text() == L"Both builds passed.\r\nNothing was committed.\r\n\r\nC:\\Reports\\build-2.md"; },
+                   "COPY REPORT puts the exact summary and path on the clipboard");
+        const auto dismissed = find(app.root, L"BUTTON", L"DISMISS");
+        require(!dismissed.empty(), "Finished card has no dismiss button");
+        PostMessageW(*std::max_element(dismissed.begin(), dismissed.end(), [](HWND a, HWND b) {
+            RECT ra{}, rb{}; GetWindowRect(a, &ra); GetWindowRect(b, &rb); return ra.left < rb.left; }), BM_CLICK, 0, 0);
+        eventually([&] { return find(app.root, L"BUTTON", L"COPY REPORT").empty(); }, "dismissed DONE card disappears");
+        require(send({{"op", "list"}, {"collection", "inbox"}}).at("items")[0].at("archived") == true,
+                "Dismissing a DONE card did not archive its record");
         require(result(pending).at("status") == "pending" && state().at("lease").is_null() &&
                 preferences().at("busy_until") == deadline, "Busy mode changed input permission");
         const auto expiring = request("EXPIRES", 1);
         eventually([&] { return result(expiring).at("status") == "expired"; }, "request expiry while busy");
         require(state().at("lease").is_null(), "Busy expiry granted input");
-        passed("chat filters, pending-first order, and ordinary request expiry during busy mode");
+        passed("waiting cards first, DONE cards, exact COPY REPORT text, dismissal, and expiry during busy mode");
 
         open_settings(app.root);
         click(button(app.root, L"MORE >"));
@@ -399,14 +408,13 @@ int main() {
         passed("saved reply add/edit/delete/cancel, blank rejection, and retention validation");
 
         back(app.root); back(app.root);
-        set_text(edit(app.root, 41), L"360"); set_text(edit(app.root, 42), L"360");
+        set_text(edit(app.root, 41), L"900"); set_text(edit(app.root, 42), L"300");
         click(button(app.root, L"APPLY"));
         settings_bounds(app.root);
         back(app.root);
         const auto lease_check = request("LEASE-CHECK");
-        eventually([&] { return find(app.root, L"BUTTON", L"@LEASE-CHECK").size() == 1; }, "lease layout fixture arrives");
-        click(button(app.root, L"@LEASE-CHECK"));
-        click(button(app.root, L"YES"));
+        eventually([&] { return find(app.root, L"BUTTON", L"YES").size() == 2; }, "lease layout fixture arrives");
+        click(leftmost(app.root, L"YES")); // The newest waiting card is first.
         eventually([&] { return result(lease_check).at("status") == "approved"; }, "UI grants private test lease");
         open_settings(app.root);
         settings_bounds(app.root);
@@ -417,26 +425,23 @@ int main() {
         capture(app.root, app.directory / L"reply-editor-minimum.bmp");
         click(button(app.root, L"CANCEL")); back(app.root); back(app.root); back(app.root);
         const auto active_lease = state().at("lease");
-        open_presence(app.root);
-        settings_bounds(app.root);
-        click(button(app.root, L"BUSY"));
         set_text(edit(app.root, 45), L"Finishing something. Continue with headless tests.");
+        click(button(app.root, L"BUSY"));
         capture(app.root, app.directory / L"presence-minimum.bmp");
-        click(button(app.root, L"SAVE"));
         require(presence().at("state") == "busy" && state().at("lease") == active_lease &&
                 result(pending).at("status") == "pending" && preferences().at("busy_until") == deadline,
                 "Busy presence changed the lease, pending request, or quiet timer");
         inside_parent(button(app.root, L"BUSY"));
         inside_parent(button(app.root, L"RELEASE"));
         inside_parent(button(app.root, L"END"));
-        passed("presence fits at 360 pixels with a lease and quiet timer; status preserves permission");
+        inside_parent(edit(app.root, 45));
+        passed("status fits at the minimum size with a lease and quiet timer; status preserves permission");
         click(button(app.root, L"RELEASE"));
         eventually([&] { return state().at("lease").is_null(); }, "private test lease is released");
-        click(button(app.root, L"ALL CHATS"));
         click(button(app.root, L"END"));
         require(preferences().at("busy_until") == 0 && find(app.root, L"BUTTON", L"END").empty(), "Ending busy mode did not clear it");
         require(result(pending).at("status") == "pending", "Ending busy mode answered a request");
-        passed("360-pixel Settings pages fit with an active lease; busy END preserves requests");
+        passed("minimum-size Settings pages fit with an active lease; busy END preserves requests");
 
         open_settings(app.root);
         click(button(app.root, L"MORE >"));
@@ -452,12 +457,10 @@ int main() {
         require(find(app.root, L"BUTTON", L"END").size() == 1, "Busy mode did not resume after restart");
         require(presence() == persisted_presence && find(app.root, L"BUTTON", L"BUSY").size() == 1,
                 "Manual presence did not survive restart");
-        open_presence(app.root);
         require(text(edit(app.root, 45)) == knock::widen(persisted_presence.at("message").get<std::string>()),
-                "Restarted presence editor lost the saved message");
-        click(button(app.root, L"AT PC"));
+                "Restarted status box lost the saved message");
         set_text(edit(app.root, 45), L"");
-        click(button(app.root, L"SAVE"));
+        click(button(app.root, L"AT PC"));
         require(presence().at("state") == "at_pc" && presence().at("message") == "" &&
                 result(pending).at("status") == "pending" && state().at("lease").is_null() &&
                 preferences().at("busy_until") == deadline, "At PC answered a request or ended the quiet timer");

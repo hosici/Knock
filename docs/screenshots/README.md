@@ -1,29 +1,16 @@
 # Rendered UI evidence
 
 These are screenshots of the actual Windows executable running under Wine 9.0
-in a private virtual desktop. They show test records used for verification;
-those records are not included in the portable release.
-
-Version 0.6 adds these captures at the default 420 × 510 size:
+on a private 1920 × 1080 virtual display. They show sample records used for
+verification; those records are not included in the portable release.
 
 | File | View |
 | --- | --- |
-| `presence.png` | Manual At PC / Away / Busy selection and an optional message |
-| `presence-inbox.png` | Saved Away status beside pending requests and a completed build |
+| `bar-100.png` | The bar at 100% (96 DPI): tasks, WAITING / WORKING / DONE cards, status and notes |
+| `bar-125.png` | The same at 125% (120 DPI); the third card scrolls into view |
+| `bar-150.png` | The same at 150% (144 DPI) |
+| `bar-notes-collapsed.png` | 100% with the notes column collapsed by the arrow |
 
-The earlier view set includes:
-
-| File | View |
-| --- | --- |
-| `inbox.png` | Requests and completed work, with original character GIFs |
-| `tasks.png` | Task list and Enter-to-create field |
-| `notes.png` | Personal conversation list and tag filter |
-| `note-conversation.png` | Scrollable text/image history and composer |
-| `note-editor.png` | Separate note title and description metadata |
-| `tag-picker.png` | Tag selection, search, and creation |
-| `shortcut.png` | Configurable global keyboard shortcut |
-
-They retain the terminal tabs, thin scroll indicators, and compact native UI.
-
-The design references are in `../references/`. These screenshots are
-not evidence of Windows 11 shell notification or taskbar behavior.
+The design reference used for the redesign was the owner's mock-up; older
+references are in `../references/`. These screenshots are not evidence of
+Windows 11 shell notification, taskbar or real display-scaling behaviour.

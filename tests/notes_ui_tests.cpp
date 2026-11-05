@@ -203,6 +203,18 @@ void command(HWND root, const std::wstring& text) {
     eventually([&] { return IsWindowVisible(edit(root, 51)); }, "note command page opens");
 }
 void back(HWND root) { click(button(root, L"< BACK")); }
+// Notes are listed in a drawn side panel; /find-note opens one by title.
+void open_note(HWND root, const std::wstring& title) {
+    command(root, L"/find-note " + title);
+    enter(edit(root, 51));
+    eventually([&] { return edit(root, 37) != nullptr; }, "note opens from /find-note");
+}
+// Clicks the first (newest) row of the drawn task list.
+void open_first_task(HWND root) {
+    HWND panel = GetDlgItem(root, 61);
+    require(panel != nullptr, "Task list panel is missing");
+    PostMessageW(panel, WM_LBUTTONUP, 0, MAKELPARAM(12, 12));
+}
 void answer_delete(HWND root, int answer) {
     PostMessageW(button(root, L"DELETE FOREVER"), BM_CLICK, 0, 0);
     HWND dialog = nullptr;
@@ -298,7 +310,7 @@ struct Application {
             DWORD owner = 0;
             GetWindowThreadProcessId(root, &owner);
             require(owner == pid, "Refusing another Knock process");
-            return IsWindowVisible(root) && buttons(root, L"Notes").size() == 1;
+            return IsWindowVisible(root) && edit(root, 30) != nullptr;
         }, "test app starts");
         eventually([&] {
             try { return knock::send_command({{"op", "status"}}, false).value("ok", false); }
@@ -356,7 +368,6 @@ int main() {
         const auto original = send({{"op", "note.append"}, {"id", id}, {"text", "https://developer.mozilla.org/"},
                                    {"images", {"reference.png"}}}).at("message");
         const auto message_id = original.at("id").get<std::string>();
-        click(button(app.root, L"Notes"));
         command(app.root, L"/delete-note Websites");
         enter(edit(app.root, 51));
         require(snapshot().at("notes").size() == 2, "Enter on delete query deleted a note");
@@ -394,8 +405,7 @@ int main() {
         back(app.root);
         passed("permanent deletion requires its explicit confirmation and affects only the chosen trashed note");
 
-        click(button(app.root, L"Websites"));
-        eventually([&] { return edit(app.root, 37) != nullptr; }, "conversation opens");
+        open_note(app.root, L"Websites");
         set_text(edit(app.root, 37), L"An unfinished thought");
         entry_menu(app.root, 46, {VK_END, VK_UP, VK_RETURN});
         eventually([&] { return buttons(app.root, L"SAVE EDIT").size() == 1; }, "entry edit opens");
@@ -429,8 +439,7 @@ int main() {
                 draft.at("edit").at("text") == "An edit kept across restart",
                 "Saved edit envelope did not keep both drafts independently");
         app.launch();
-        click(button(app.root, L"Notes"));
-        click(button(app.root, L"Websites"));
+        open_note(app.root, L"Websites");
         eventually([&] { return buttons(app.root, L"SAVE EDIT").size() == 1; }, "edit draft restores");
         require(caption(edit(app.root, 37)) == L"An edit kept across restart", "Restart lost pending edit text");
         click(button(app.root, L"CANCEL"));
@@ -502,22 +511,20 @@ int main() {
         passed("content search moves across bounded result pages in both directions");
         send({{"op", "request.create"}, {"chat", "NOTES-TEST"}, {"message", "Test the compact layout"},
               {"timeout_seconds", 300}, {"lease_seconds", 300}});
-        click(button(app.root, L"Notifications"));
         eventually([&] { return buttons(app.root, L"YES").size() == 1; }, "test request appears");
         // These actions remove/rebuild their own controls. Dispatch them on
         // the UI queue, then verify the resulting state instead of waiting
         // for a synchronous reply from a destroyed button window.
         PostMessageW(button(app.root, L"YES"), BM_CLICK, 0, 0);
         eventually([&] { return !snapshot().at("lease").is_null(); }, "input strip appears");
-        click(button(app.root, L"Notes"));
         open_settings(app.root);
-        set_text(edit(app.root, 41), L"360");
-        set_text(edit(app.root, 42), L"360");
+        set_text(edit(app.root, 41), L"900");
+        set_text(edit(app.root, 42), L"300");
         PostMessageW(button(app.root, L"APPLY"), BM_CLICK, 0, 0);
         eventually([&] {
             RECT bounds{};
             GetWindowRect(app.root, &bounds);
-            return bounds.right - bounds.left == 360 && bounds.bottom - bounds.top == 360;
+            return bounds.right - bounds.left == 900 && bounds.bottom - bounds.top == 300;
         }, "minimum window size applies");
         PostMessageW(button(app.root, L"MORE >"), BM_CLICK, 0, 0);
         eventually([&] { return buttons(app.root, L"SET TIMER").size() == 1; }, "More Settings opens");
@@ -541,7 +548,7 @@ int main() {
             if (!caption(control).starts_with(L"/")) continue;
             RECT item{};
             GetWindowRect(control, &item);
-            require(item.top >= bounds.bottom, "Slash suggestions overlap the Notes content at minimum size");
+            require(item.left >= bounds.right, "Slash suggestions overlap the middle column at minimum size");
         }
         screenshot(app.root, L"note-commands-small.bmp");
         passed("slash suggestions fit at minimum size with busy, input and Undo strips present");
@@ -566,9 +573,8 @@ int main() {
         passed("note Find and attachment composer fit at minimum size with presence, input and quiet strips");
 
         send({{"op", "task.add"}, {"title", "Compact task"}, {"body", "Keep the metadata controls separate."}});
-        click(button(app.root, L"Task List"));
-        eventually([&] { return buttons(app.root, L"Compact task").size() == 1; }, "compact task appears");
-        PostMessageW(button(app.root, L"Compact task"), BM_CLICK, 0, 0);
+        eventually([&] { return snapshot().at("tasks").size() == 1; }, "compact task appears");
+        open_first_task(app.root);
         eventually([&] { return IsWindowVisible(edit(app.root, 33)) && IsWindowVisible(edit(app.root, 34)); },
                    "compact task metadata opens");
         for (int id : {31, 32, 33, 34}) inside_parent(edit(app.root, id));

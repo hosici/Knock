@@ -27,6 +27,8 @@ constexpr std::string_view help_text = R"(Knock — a local inbox for your agent
   knock run --chat AUDIO-1 [--title "Build"] [--cwd DIRECTORY] -- PROGRAM ARGS...
   knock job JOB_ID
   knock jobs [--offset 0] [--limit 50]
+  knock done --chat AUDIO-1 --summary "What was done" [--report PATH] [--task TASK_ID]
+  knock inbox [--offset 0] [--limit 50]
   knock tasks list [--offset 0] [--limit 50]
   knock tasks add --title TEXT [--body TEXT] [--operator NAME] [--project NAME]
   knock tasks update ID [--title TEXT] [--body TEXT] [--status todo|in_progress|done]
@@ -39,7 +41,8 @@ constexpr std::string_view help_text = R"(Knock — a local inbox for your agent
   knock notes append ID --body TEXT
   knock notes remove ID
 
-Text can also come from UTF-8 files: --message-file, --body-file, --resume-file.
+Text can also come from UTF-8 files: --message-file, --body-file, --resume-file,
+--summary-file. done marks the chat finished and completes its matching task.
 Repeat --tag for multiple note labels; supplying tags replaces the selection.
 Notes are personal conversations. Add/update --body edits the description;
 append adds a message. Get returns a bounded, oldest-first message page.
@@ -338,6 +341,30 @@ int run_cli(const std::vector<std::wstring>& arguments) {
         require_text(options.title, "--title", 160);
         if (!std::filesystem::is_directory(options.directory)) throw std::runtime_error("--cwd is not an existing directory");
         return output(start_job(options));
+    }
+    if (action == L"done") {
+        parsed.allow({L"--chat", L"--summary", L"--summary-file", L"--report", L"--task"});
+        const auto chat = parsed.text(L"--chat");
+        const auto summary = text_option(parsed, L"--summary", L"--summary-file", true);
+        require_text(chat, "--chat", 64);
+        require_text(summary, "--summary", 16000);
+        Json command{{"op", "done"}, {"chat", chat}, {"summary", summary}, {"report", ""}};
+        if (parsed.has(L"--report")) {
+            const auto report = parsed.wide(L"--report");
+            if (report.empty()) throw std::runtime_error("--report must not be empty");
+            // Store an absolute path: the person pastes it from another directory.
+            command["report"] = narrow(std::filesystem::absolute(report).wstring());
+        }
+        if (parsed.has(L"--task")) {
+            const auto task = parsed.text(L"--task");
+            require_text(task, "--task", 128);
+            command["task"] = task;
+        }
+        return output(send_command(command));
+    }
+    if (action == L"inbox") {
+        parsed.allow({L"--offset", L"--limit"});
+        return output(list_items("inbox", parsed));
     }
     if (action == L"jobs") {
         parsed.allow({L"--offset", L"--limit"});

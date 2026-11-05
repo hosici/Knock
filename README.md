@@ -23,20 +23,16 @@ The ZIP includes the ready-built app and CLI. Extract the whole thing and run
 
 ## What it looks like
 
-![The request inbox with Away status](docs/screenshots/presence-inbox.png)
-
-![A personal note conversation](docs/screenshots/note-conversation.png)
+![Knock's bar: tasks, job cards, status and notes](docs/screenshots/bar-100.png)
 
 <details>
-<summary>A few more screens</summary>
+<summary>At 125% and 150% scaling, and with the notes tucked away</summary>
 
-![Picking a saved reply and changing it before sending](docs/screenshots/saved-replies.png)
+![The bar at 125% scaling](docs/screenshots/bar-125.png)
 
-![Editing an entry in a personal note](docs/screenshots/note-entry-edit.png)
+![The bar at 150% scaling](docs/screenshots/bar-150.png)
 
-![Restoring a deleted note from Trash](docs/screenshots/note-trash.png)
-
-![Preferences at the smallest window size](docs/screenshots/preferences.png)
+![The notes column collapsed with the arrow](docs/screenshots/bar-notes-collapsed.png)
 
 </details>
 
@@ -49,17 +45,31 @@ Extract the whole Windows x64 zip into a folder you want to keep, then run
 **KnockTray.exe**. Keep **knock.exe** and the **assets** folder beside it.
 There's no extra application runtime to install.
 
-Click the tray icon or press **Ctrl + Alt + K** to open or hide it. Opening
-from the tray gives you a popup that hides when you click away. Opening with
-the shortcut keeps it open and on top while you use other windows. Press the
-shortcut again or choose **Hide Knock** from the right-click menu when you're
-done. **Escape** backs out of the current view, then hides the popup.
+Click the tray icon or press **Ctrl + Alt + K** to open or hide it. It's a wide
+bar along the top of the screen, centred:
 
-Right-click anywhere in the popup and choose **Settings** to make it yours:
+- **Task List** on the left. Click a task to edit it; type in **New task...**
+  and press **Enter** to add one.
+- **Job cards** in the middle, one per chat label. Each has a status tag
+  (**WAITING**, **WORKING** or **DONE**), the job's name, its own little pixel
+  character, and what it's asking or reporting. A request has **YES**,
+  **CUSTOM** and **NO** under it; a finished job has **COPY REPORT**. Scroll
+  sideways when there are more cards than fit. **×** clears a card.
+- **Your status** (At PC, Away, Busy) with an optional message.
+- **Notes** with a search box. The arrow on the far right tucks the notes away
+  and brings them back; Knock remembers which you chose.
+
+Opening from the tray gives you a bar that hides when you click away. Opening
+with the shortcut keeps it open and on top while you use other windows. Press
+the shortcut again or choose **Hide Knock** from the right-click menu when
+you're done. **Escape** backs out of the current view, then hides the bar.
+
+Right-click anywhere in the bar and choose **Settings** to make it yours:
 
 - **CHANGE** lets you record a different hotkey or disable it.
-- Set the window width and height, then **APPLY**. The range is 360–800 wide
-  and 360–1000 tall, in logical pixels; **RESET** returns to 420 × 510.
+- Set the bar's width and height, then **APPLY**. The range is 900–3840 wide
+  and 300–800 tall, in logical pixels; **RESET** returns to 1720 × 380. It
+  always fits inside the screen, so at 150% scaling it may be narrower.
 - Turn on **Start with Windows** if you want it there when you log in.
 
 You can also open Settings or quit Knock from the tray menu.
@@ -69,21 +79,23 @@ stay in Trash. Right-click anywhere and choose **Quiet notifications...** to qui
 for 15 minutes, 30 minutes, or an hour. Requests still wait in the inbox and keep
 their normal expiry. When the timer ends, Knock sends one inbox summary.
 
-In Notifications, click **CHATS** or a chat label to filter the inbox. **ALL
-CHATS** clears it. Pending requests stay above answered requests and build
-results. **CUSTOM → SAVED REPLIES** puts a preset into the reply box; edit it if
-needed, then press **SEND**. Manage your own presets in Settings → More.
+Cards waiting for an answer come first, then working ones, then finished ones.
+**CUSTOM** turns the card's text box into a reply box; **SAVED** puts a preset
+into it, edit it if needed, then press **SEND**. Manage your own presets in
+Settings → More. The characters are drawn by Knock from the job's name, so the
+same job always gets the same one.
 
 To update, quit the running copy and replace its application files. Saved data
 lives separately, so your notes and tasks stay put.
 
 ### Stepping away
 
-Click the status beneath the tabs, or choose **Status...** from the right-click
-or tray menu. Pick **At PC**, **Away**, or **Busy**, add a short message if you
-want, and press **SAVE**. Something like “Out for coffee” or “In a meeting;
-headless tests are fine” is enough. The first run says **SET STATUS** until you
-pick one.
+Use the status column: click **At PC**, **Away**, or **Busy**. The message
+box under it is optional; it's saved with the status when you click one, when
+you press **Enter**, or a moment after you stop typing. Something like “Out
+for coffee” or “In a meeting; headless tests are fine” is enough. **Status...**
+in the right-click or tray menu jumps to the message box. Until you pick one,
+agents see no status.
 
 Agents get the status with their requests. While Away or Busy, a normal request
 that's still pending stays in the inbox but returns immediately with the status
@@ -96,12 +108,12 @@ This is a manual setting. It survives restarting Knock and stays as set until
 you change it. It doesn't guess from mouse activity. The quiet timer is
 separate: it only silences notification banners.
 
-![Setting availability and a short message](docs/screenshots/presence.png)
-
 ### Notes
 
-Open **Notes**, type a title, and press **Enter**. That opens a blank terminal-like
-conversation for that note. A name like “Websites” or “Project ideas” is enough.
+Type in the notes **search** box to narrow the list by title, description or
+tag, and click a note to open it in the middle of the bar. **Enter** opens the
+best match, or makes a new note with that title when nothing matches; **+**
+makes one straight away. A name like “Websites” or “Project ideas” is enough.
 
 - **Enter** sends a message; **Shift + Enter** starts a new line.
 - **Ctrl + V** pastes text or an image into the composer. Images appear as
@@ -113,13 +125,13 @@ conversation for that note. A name like “Websites” or “Project ideas” is
 - **Ctrl+F** searches the conversation. Previous/next finds matching entries,
   including older messages that were not loaded when you opened the note.
 - **TAGS** organizes the note, and **EDIT** changes its title and description.
-  **FILTER** on the notes list narrows it to a tag or untagged notes.
+  **#** next to the search box narrows the list to a tag or untagged notes.
 
 It's your own notebook. Nothing in a note gets executed or sent to an AI.
 Existing notes from earlier versions keep their text as the first message.
 
-For finding and clearing things out, the title box on the **Notes list** also
-takes a couple of commands:
+For finding and clearing things out, the notes search box also takes a couple
+of commands:
 
 - **`/find-note`** opens a search page. Add a name, like
   **`/find-note websites`**, or just type on that page to narrow the results.
@@ -176,9 +188,20 @@ For a build you want to leave running:
 ```
 
 Knock captures the result and sends a notification when it finishes. Use
-**COPY** on the completion card and paste the message back into the named chat
+**COPY** on the job's card and paste the message back into the named chat
 to wake the agent up. Resuming a chat automatically would need support from
 that agent's host.
+
+When an agent has finished the whole job, it tells you:
+
+```powershell
+.\knock.exe done --chat AUDIO-1 --summary "Mixer done; all 40 tests pass. Nothing committed." --report "C:\Projects\Current\report.md"
+```
+
+Its card turns to **DONE** with the summary, and a task for that chat (operator
+`AUDIO-1`, or a title starting `AUDIO-1:`) is ticked off. **COPY REPORT** puts
+the summary and the report path on the clipboard as plain text.
+`.\knock.exe inbox` lists finished jobs as JSON for other tools.
 
 This is a cooperative permission system: agents have to follow the answer.
 It doesn't lock input at the OS level. A custom reply, timeout, or error never
@@ -191,8 +214,9 @@ Native C++20 / Win32, a local named pipe, and files under
 request history, settings, and command logs. There are no accounts or cloud
 services to set up. The CLI and tray app run in the same Windows session.
 
-The little character GIFs are bundled with the app. They pause when the inbox
-isn't visible. Credits and dependency notices are in
+The job characters are generated by Knock itself from each job's name; no
+image files are involved. The original character GIFs are still bundled but
+no longer shown. Credits and dependency notices are in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Windows decides whether to show notification banners. These

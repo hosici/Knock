@@ -8,7 +8,7 @@ if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
-add_library(knock_core src/store.cpp)
+add_library(knock_core src/store.cpp src/character.cpp)
 target_include_directories(knock_core PUBLIC include third_party)
 add_library(knock_settings src/window_settings.cpp)
 target_include_directories(knock_settings PUBLIC include PRIVATE third_party)
@@ -41,6 +41,9 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME cli_info COMMAND cli_info_tests)
     set_tests_properties(cli_info PROPERTIES TIMEOUT 10)
+    add_executable(character_tests tests/character_tests.cpp)
+    target_link_libraries(character_tests PRIVATE knock_core)
+    add_test(NAME characters COMMAND character_tests)
     add_executable(store_tests tests/store_tests.cpp)
     target_link_libraries(store_tests PRIVATE knock_core)
     add_test(NAME store COMMAND store_tests)
@@ -67,7 +70,7 @@ if(WIN32)
         add_test(NAME platform COMMAND platform_tests)
         set_tests_properties(platform PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
     endif()
-    add_executable(KnockTray WIN32 src/tray_main.cpp src/ui.cpp src/sprite_win.cpp
+    add_executable(KnockTray WIN32 src/tray_main.cpp src/ui.cpp
         src/hotkey_win.cpp src/note_images_win.cpp assets/app.rc)
     target_link_libraries(KnockTray PRIVATE knock_platform knock_settings gdiplus comctl32 dwmapi user32 gdi32)
     add_executable(knock src/cli_main.cpp src/cli.cpp src/runner_win.cpp assets/cli.rc)
@@ -131,7 +134,7 @@ if(WIN32)
         endif()
     endforeach()
     if(MINGW)
-        foreach(target KnockTray knock cli_info_tests store_tests window_settings_tests platform_tests inbox_ui_tests notes_ui_tests ui_tests sprite_tests runner_fixture note_images_tests hotkey_tests)
+        foreach(target KnockTray knock cli_info_tests character_tests store_tests window_settings_tests platform_tests inbox_ui_tests notes_ui_tests ui_tests sprite_tests runner_fixture note_images_tests hotkey_tests)
             if(TARGET ${target})
                 target_link_options(${target} PRIVATE -static -static-libgcc -static-libstdc++)
             endif()
@@ -152,11 +155,8 @@ if(WIN32)
     install(FILES HANDOFF.md DESTINATION .)
     install(FILES docs/VALIDATION.md docs/PROTOCOL.md docs/FEATURES.md
         docs/CLI.md docs/AGENT_INSTRUCTIONS.md DESTINATION docs)
-    install(FILES docs/screenshots/inbox.png docs/screenshots/note-conversation.png
-        docs/screenshots/note-find.png docs/screenshots/settings.png
-        docs/screenshots/saved-replies.png docs/screenshots/note-entry-edit.png
-        docs/screenshots/note-trash.png docs/screenshots/preferences.png
-        docs/screenshots/presence.png docs/screenshots/presence-inbox.png
+    install(FILES docs/screenshots/bar-100.png docs/screenshots/bar-125.png
+        docs/screenshots/bar-150.png docs/screenshots/bar-notes-collapsed.png
         DESTINATION docs/screenshots)
     install(FILES third_party/nlohmann-LICENSE.txt DESTINATION licenses)
 endif()
