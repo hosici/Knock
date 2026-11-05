@@ -211,7 +211,7 @@ void open_note(HWND root, const std::wstring& title) {
 }
 // Clicks the first (newest) row of the drawn task list.
 void open_first_task(HWND root) {
-    HWND panel = FindWindowExW(root, nullptr, L"Knock.Panel.v1", L"Task list");
+    HWND panel = GetDlgItem(root, 61);
     require(panel != nullptr, "Task list panel is missing");
     PostMessageW(panel, WM_LBUTTONUP, 0, MAKELPARAM(12, 12));
 }

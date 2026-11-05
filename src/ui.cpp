@@ -181,9 +181,9 @@ public:
             0, 0, 10, 10, window_, nullptr, instance_, this);
         if (!content_) throw std::runtime_error("Could not create the inbox.");
         tasks_view_ = CreateWindowExW(0, panel_class, L"Task list", WS_CHILD | WS_VISIBLE,
-            0, 0, 10, 10, window_, nullptr, instance_, this);
+            0, 0, 10, 10, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(61)), instance_, this);
         notes_view_ = CreateWindowExW(0, panel_class, L"Notes", WS_CHILD | WS_VISIBLE,
-            0, 0, 10, 10, window_, nullptr, instance_, this);
+            0, 0, 10, 10, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(62)), instance_, this);
         if (!tasks_view_ || !notes_view_) throw std::runtime_error("Could not create the side panels.");
         dpi_ = GetDpiForWindow(window_);
         if (!dpi_) dpi_ = 96;
@@ -307,6 +307,8 @@ private:
     int cards_scroll_ = 0, cards_extent_ = 0, card_width_ = 0, card_gap_ = 0;
     std::map<std::string, Character> characters_;
     bool presence_dirty_ = false;
+    bool laying_out_ = false;
+    bool relayout_ = false;
     HFONT body_font_ = nullptr;
     HFONT small_font_ = nullptr;
     HFONT title_font_ = nullptr;
@@ -1544,6 +1546,8 @@ private:
     }
     void open_tag_picker() {
         if (tag_picker_open_) { close_tag_picker(); return; }
+        if (settings_open_ && detail_ == Detail::none) close_settings();
+        if (detail_ == Detail::none && note_page_ != NotePage::list) close_note_page();
         tag_picker_open_ = true;
         tag_offset_ = 0;
         tag_query_edit_ = make_edit(content_, 36, false,
@@ -2167,11 +2171,17 @@ private:
         auto value = narrow(edit_text(reply_edit_));
         if (trim(value).empty()) { feedback(L"Write a reply first."); return; }
         auto result = mutate({{"op", "request.resolve"}, {"id", reply_id_}, {"decision", "custom"}, {"text", value}});
-        if (result.value("ok", false)) { drafts_.erase(reply_id_); cancel_reply(false); }
+        if (result.value("ok", false)) {
+            // Lay out from the answered state, not the stale pending one.
+            snapshot_ = store_.snapshot();
+            drafts_.erase(reply_id_);
+            cancel_reply(false);
+        }
     }
     void resolve(const std::string& id, const char* decision) {
-        if (mutate({{"op", "request.resolve"}, {"id", id}, {"decision", decision}}).value("ok", false)
-            && reply_id_ == id) cancel_reply(false);
+        if (!mutate({{"op", "request.resolve"}, {"id", id}, {"decision", decision}}).value("ok", false)) return;
+        snapshot_ = store_.snapshot();
+        if (reply_id_ == id) cancel_reply(false);
     }
     void copy(const std::string& value, const wchar_t* done = L"Copied. Paste into the named agent chat.") {
         auto wide = widen(value);
@@ -2404,8 +2414,21 @@ private:
         DeleteObject(brush);
     }
 
+    // Moving and destroying controls can change focus, and focus changes can
+    // ask for another layout. Run that afterwards rather than inside this one.
     void layout() {
         if (!window_ || !content_) return;
+        if (laying_out_) { relayout_ = true; return; }
+        laying_out_ = true;
+        try {
+            do {
+                relayout_ = false;
+                layout_once();
+            } while (relayout_);
+        } catch (...) { laying_out_ = false; throw; }
+        laying_out_ = false;
+    }
+    void layout_once() {
         for (auto& [id, model] : buttons_) { (void)id; model.seen = false; }
         RECT client{};
         GetClientRect(window_, &client);
@@ -2575,6 +2598,16 @@ private:
 
     // ------------------------------------------------------------ side panels
     int line_height(HFONT font) const { return text_height(L"Ag", px(200), font); }
+    // The drawn lists also expose their titles as window text, in order, for
+    // screen readers and the native UI tests.
+    static void describe_panel(HWND panel, const wchar_t* name, const std::vector<PanelRow>& rows) {
+        std::wstring summary = name;
+        for (const auto& row : rows) {
+            summary += (summary.size() == wcslen(name) ? L": " : L" | ") + widen(get_string(row.item, "title"));
+            if (summary.size() > 4000) break;
+        }
+        SetWindowTextW(panel, summary.c_str());
+    }
     void layout_tasks_panel() {
         RECT area{};
         GetClientRect(tasks_view_, &area);
@@ -2589,6 +2622,7 @@ private:
             y += height + px(6);
         }
         tasks_extent_ = y;
+        describe_panel(tasks_view_, L"Tasks", task_rows_);
         tasks_scroll_ = std::clamp(tasks_scroll_, 0, std::max(0, tasks_extent_ - static_cast<int>(area.bottom)));
         InvalidateRect(tasks_view_, nullptr, FALSE);
     }
@@ -2606,6 +2640,7 @@ private:
             y += height;
         }
         notes_extent_ = y;
+        describe_panel(notes_view_, L"Notes", note_list_rows_);
         notes_scroll_ = std::clamp(notes_scroll_, 0, std::max(0, notes_extent_ - static_cast<int>(area.bottom)));
         InvalidateRect(notes_view_, nullptr, FALSE);
     }

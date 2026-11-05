@@ -188,4 +188,19 @@ assert last["next_offset"] is None and last["notes"][0]["id"] == first["id"], la
 cli("notes", "remove", first["id"])
 cli("notes", "remove", second["id"])
 passed("bounded list pagination and newest-first ordering")
+matching = cli("tasks", "add", "--title", "UI-9: finish the cards", "--operator", "UI-9")["task"]
+report = temporary / "report.md"
+report.write_text("# Report\n", encoding="utf-8")
+finished = cli("done", "--chat", "UI-9", "--summary", "\x1b[32mAll checks passed\x1b[0m — café.\nNothing committed.",
+               "--report", windows(report))["done"]
+assert finished["status"] == "done" and finished["summary"] == "All checks passed — café.\nNothing committed.", finished
+assert finished["report"] == windows(report) and finished["tasks_completed"] == [matching["id"]], finished
+assert cli("tasks", "list")["tasks"][0]["status"] == "done"
+inbox = cli("inbox")
+assert inbox["total"] == 1 and inbox["next_offset"] is None and inbox["inbox"][0]["id"] == finished["id"], inbox
+cli("done", "--chat", "UI-9", code=5)
+cli("done", "--chat", "UI-9", "--summary", "x", "--task", "missing", code=5)
+assert cli("inbox", "--limit", "1")["inbox"][0]["summary"] == finished["summary"]
+cli("tasks", "remove", matching["id"])
+passed("done stores a clean summary and absolute report path, completes the task, and inbox lists it")
 print(json.dumps({"ok": True, "data_directory": str(temporary)}), flush=True)
