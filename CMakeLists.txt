@@ -70,7 +70,7 @@ if(WIN32)
         add_test(NAME platform COMMAND platform_tests)
         set_tests_properties(platform PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
     endif()
-    add_executable(KnockTray WIN32 src/tray_main.cpp src/ui.cpp src/sprite_win.cpp
+    add_executable(KnockTray WIN32 src/tray_main.cpp src/ui.cpp
         src/hotkey_win.cpp src/note_images_win.cpp assets/app.rc)
     target_link_libraries(KnockTray PRIVATE knock_platform knock_settings gdiplus comctl32 dwmapi user32 gdi32)
     add_executable(knock src/cli_main.cpp src/cli.cpp src/runner_win.cpp assets/cli.rc)

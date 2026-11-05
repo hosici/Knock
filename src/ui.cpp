@@ -1,6 +1,8 @@
 #include "knock/ui.hpp"
 #include "knock/platform.hpp"
-#include "knock/sprite.hpp"
+#include "knock/character.hpp"
+#include "knock/pixel_font.hpp"
+#include "knock/report.hpp"
 #include "knock/hotkey.hpp"
 #include "knock/note_images.hpp"
 #include "knock/window_settings.hpp"
@@ -29,12 +31,26 @@ namespace knock {
 namespace {
 constexpr wchar_t window_class[] = L"Knock.Tray.v1";
 constexpr wchar_t content_class[] = L"Knock.Content.v1";
+constexpr wchar_t panel_class[] = L"Knock.Panel.v1";
 constexpr UINT tray_message = WM_APP + 1;
 constexpr UINT change_message = WM_APP + 2;
 constexpr UINT show_message = WM_APP + 20;
-constexpr COLORREF background = RGB(9, 9, 9);
+// The bar: a dark frame, lighter panels for the working area, and darker
+// wells for rows, text boxes and buttons.
+constexpr COLORREF frame = RGB(27, 27, 27);
+constexpr COLORREF background = RGB(32, 32, 32);
+constexpr COLORREF well = RGB(23, 23, 23);
+constexpr COLORREF raised = RGB(47, 47, 47);
+constexpr COLORREF hover_fill = RGB(40, 40, 40);
+constexpr COLORREF divider = RGB(44, 44, 44);
 constexpr COLORREF top_background = RGB(21, 21, 21);
 constexpr COLORREF border = RGB(71, 71, 71);
+constexpr COLORREF search_fill = RGB(64, 64, 64);
+constexpr COLORREF blue = RGB(96, 136, 222);
+constexpr COLORREF blue_fill = RGB(38, 50, 80);
+constexpr COLORREF green = RGB(128, 178, 70);
+constexpr COLORREF green_fill = RGB(35, 50, 25);
+constexpr COLORREF orange_fill = RGB(72, 42, 30);
 constexpr COLORREF foreground = RGB(225, 225, 217);
 constexpr COLORREF muted = RGB(151, 151, 145);
 constexpr COLORREF subdued = RGB(104, 104, 99);
@@ -129,8 +145,9 @@ public:
         server_.stop();
         quitting_ = true;
         if (window_ && IsWindow(window_)) DestroyWindow(window_);
-        for (HFONT font : {body_font_, small_font_, title_font_}) if (font) DeleteObject(font);
+        for (HFONT font : {body_font_, small_font_, title_font_, row_font_}) if (font) DeleteObject(font);
         if (edit_brush_) DeleteObject(edit_brush_);
+        if (search_brush_) DeleteObject(search_brush_);
         if (icon_) DestroyIcon(icon_);
     }
 
@@ -152,29 +169,34 @@ public:
         wc.lpfnWndProc = content_proc;
         wc.lpszClassName = content_class;
         RegisterClassExW(&wc);
-        edit_brush_ = CreateSolidBrush(background);
+        wc.lpfnWndProc = panel_proc;
+        wc.lpszClassName = panel_class;
+        RegisterClassExW(&wc);
+        edit_brush_ = CreateSolidBrush(well);
+        search_brush_ = CreateSolidBrush(search_fill);
         window_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, window_class, L"Knock",
-            WS_POPUP | WS_CLIPCHILDREN, 0, 0, 420, 510, nullptr, nullptr, instance_, this);
+            WS_POPUP | WS_CLIPCHILDREN, 0, 0, 1720, 380, nullptr, nullptr, instance_, this);
         if (!window_) throw std::runtime_error("Could not create the tray window.");
-        content_ = CreateWindowExW(WS_EX_CONTROLPARENT, content_class, L"Knock inbox", WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
-            12, 34, 396, 464, window_, nullptr, instance_, this);
+        content_ = CreateWindowExW(WS_EX_CONTROLPARENT, content_class, L"Knock jobs", WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
+            0, 0, 10, 10, window_, nullptr, instance_, this);
         if (!content_) throw std::runtime_error("Could not create the inbox.");
+        tasks_view_ = CreateWindowExW(0, panel_class, L"Task list", WS_CHILD | WS_VISIBLE,
+            0, 0, 10, 10, window_, nullptr, instance_, this);
+        notes_view_ = CreateWindowExW(0, panel_class, L"Notes", WS_CHILD | WS_VISIBLE,
+            0, 0, 10, 10, window_, nullptr, instance_, this);
+        if (!tasks_view_ || !notes_view_) throw std::runtime_error("Could not create the side panels.");
         dpi_ = GetDpiForWindow(window_);
         if (!dpi_) dpi_ = 96;
         create_fonts();
+        task_entry_edit_ = make_edit(window_, 38, false, L"New task...");
+        footer_edit_ = make_edit(window_, 30, false, L"search");
+        presence_edit_ = make_edit(window_, 45, true, L"Out for coffee...");
+        SendMessageW(presence_edit_, EM_SETLIMITTEXT, 500, 0);
+        SetWindowTextW(presence_edit_, widen(get_string(presence(), "message")).c_str());
         icon_ = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(1), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR));
         if (!icon_) icon_ = CopyIcon(LoadIconW(nullptr, IDI_APPLICATION));
         taskbar_created_ = RegisterWindowMessageW(L"TaskbarCreated");
         add_tray();
-        auto assets = executable_path().parent_path() / L"assets";
-        request_sprite_.load(assets, L"request");
-        complete_sprite_.load(assets, L"complete");
-        note_sprite_.load(assets, L"note");
-        // Local asset overrides take precedence, without requiring a rebuild.
-        auto custom_assets = data_directory() / L"assets";
-        request_sprite_.load(custom_assets, L"request");
-        complete_sprite_.load(custom_assets, L"complete");
-        note_sprite_.load(custom_assets, L"note");
         store_.set_changed([this](const Json& change) {
             auto owned = std::make_unique<Json>(change);
             if (PostMessageW(window_, change_message, 0, reinterpret_cast<LPARAM>(owned.get()))) owned.release();
@@ -191,7 +213,11 @@ public:
                 if (message.wParam == VK_ESCAPE) { escape(); continue; }
                 if (note_keys(message.hwnd, message.wParam)) continue;
                 if (settings_keys(message.hwnd, message.wParam)) continue;
-                if (message.wParam == VK_RETURN && message.hwnd == footer_edit_) { add_item(); continue; }
+                if (message.wParam == VK_RETURN && message.hwnd == footer_edit_) { notes_enter(); continue; }
+                if (message.wParam == VK_RETURN && message.hwnd == task_entry_edit_) { add_task(); continue; }
+                if (message.wParam == VK_RETURN && message.hwnd == presence_edit_ && GetKeyState(VK_SHIFT) >= 0) {
+                    save_presence_message(true); continue;
+                }
                 if (message.wParam == VK_RETURN && message.hwnd == tag_query_edit_) { activate_tag_query(); continue; }
                 if (message.hwnd == composer_edit_ &&
                     ((message.wParam == 'V' && GetKeyState(VK_CONTROL) < 0) ||
@@ -214,28 +240,35 @@ public:
     }
 
 private:
-    enum class Tab { notifications, tasks, notes };
     enum class Detail { none, task, note };
     enum class SaveIntent { explicit_action, background };
-    enum class SettingsPage { general, preferences, replies, reply, presence };
+    enum class SettingsPage { general, preferences, replies, reply };
     enum class NotePage { list, find, remove, trash, search };
-    enum class Icon { none, tasks, notifications, notes };
     struct Button {
         HWND handle = nullptr;
         std::wstring label;
         std::function<void()> action;
-        bool tab = false;
         bool active = false;
         bool seen = false;
         bool hover = false;
-        bool card = false;
         bool left_aligned = false;
         bool note_result = false;
         bool bare = false;
-        Icon icon = Icon::none;
+        bool arrow = false;
+        bool close = false;
         Json record;
     };
-    struct Row { Json item; bool request; int top; int height; int message_height; int tail_height; };
+    // A job card collects everything one chat label has sent to Knock.
+    struct Card {
+        std::string chat;
+        std::string state; // waiting, working or done
+        std::vector<Json> pending;
+        Json job, done, answered;
+        bool running = false;
+        std::int64_t activity = 0;
+    };
+    struct CardGeometry { RECT tag, close, name, art, box, actions; };
+    struct PanelRow { Json item; int top; int height; };
     struct Banner { std::string id; std::wstring title; std::wstring text; bool inbox = false; };
     struct NoteRow { std::size_t index; int top; int height; int text_height; };
     struct NoteDraft { std::string text; std::vector<std::string> images; std::string client_id; };
@@ -256,16 +289,34 @@ private:
     HWND content_ = nullptr;
     HICON icon_ = nullptr;
     HBRUSH edit_brush_ = nullptr;
+    HBRUSH search_brush_ = nullptr;
+    HWND tasks_view_ = nullptr;
+    HWND notes_view_ = nullptr;
+    HWND presence_edit_ = nullptr;
+    HWND task_entry_edit_ = nullptr;
+    RECT tasks_rect_{}, middle_rect_{}, presence_rect_{}, notes_rect_{}, arrow_rect_{};
+    RECT search_bounds_{}, presence_box_{}, task_entry_bounds_{};
+    int full_width_ = 0;
+    int lease_line_y_ = 0;
+    int quiet_line_y_ = 0;
+    int filter_line_y_ = 0;
+    std::vector<PanelRow> task_rows_, note_list_rows_;
+    int tasks_scroll_ = 0, notes_scroll_ = 0, tasks_extent_ = 0, notes_extent_ = 0;
+    int hover_task_ = -1, hover_note_ = -1;
+    std::vector<Card> cards_;
+    int cards_scroll_ = 0, cards_extent_ = 0, card_width_ = 0, card_gap_ = 0;
+    std::map<std::string, Character> characters_;
+    bool presence_dirty_ = false;
     HFONT body_font_ = nullptr;
     HFONT small_font_ = nullptr;
     HFONT title_font_ = nullptr;
+    HFONT row_font_ = nullptr;
     UINT taskbar_created_ = 0;
     UINT dpi_ = 96;
     int button_id_ = 100;
     std::map<int, Button> buttons_;
     std::map<std::string, int> button_keys_;
     Json snapshot_;
-    Tab tab_ = Tab::notifications;
     Detail detail_ = Detail::none;
     std::string detail_id_;
     std::string detail_original_title_;
@@ -282,11 +333,7 @@ private:
     HWND settings_height_edit_ = nullptr;
     HWND settings_retention_edit_ = nullptr;
     HWND settings_reply_edit_ = nullptr;
-    HWND settings_presence_edit_ = nullptr;
     SettingsPage settings_page_ = SettingsPage::general;
-    SettingsPage presence_return_page_ = SettingsPage::general;
-    bool presence_return_settings_ = false;
-    std::string presence_draft_state_;
     int saved_reply_index_ = -1;
     int saved_reply_offset_ = 0;
     HWND footer_edit_ = nullptr;
@@ -348,9 +395,7 @@ private:
     bool tag_picker_open_ = false;
     std::string note_filter_;
     bool untagged_filter_ = false;
-    int notes_bar_y_ = 0;
     int note_body_y_ = 0;
-    std::size_t visible_note_count_ = 0;
     std::vector<std::string> tag_choices_;
     int tag_offset_ = 0;
     int tag_visible_rows_ = 1;
@@ -358,15 +403,9 @@ private:
     std::string reply_id_;
     std::string reply_draft_;
     std::map<std::string, std::string> drafts_;
-    std::string inbox_chat_;
-    int inbox_bar_y_ = 0;
-    int presence_bar_y_ = 0;
-    int lease_bar_y_ = 0;
-    int busy_bar_y_ = 0;
     bool busy_was_active_ = false;
     bool busy_summary_pending_ = false;
     ULONGLONG busy_retry_after_ = 0;
-    int scroll_[3]{};
     int content_height_ = 0;
     int viewport_height_ = 0;
     bool dragging_scroll_ = false;
@@ -375,9 +414,6 @@ private:
     int drag_start_y_ = 0;
     int drag_start_scroll_ = 0;
     int wheel_remainder_ = 0;
-    std::vector<Row> rows_;
-    std::map<std::string, int> row_tops_;
-    Sprite request_sprite_, complete_sprite_, note_sprite_;
     std::deque<Banner> banners_;
     std::optional<Banner> active_banner_;
     ULONGLONG banner_started_ = 0;
@@ -386,7 +422,9 @@ private:
 
     int px(int value) const { return MulDiv(value, static_cast<int>(dpi_), 96); }
     RECT rect(int x, int y, int width, int height) const { return RECT{x, y, x + width, y + height}; }
-    int& scroll() { return scroll_[static_cast<int>(tab_)]; }
+    bool dashboard() const {
+        return !settings_open_ && detail_ == Detail::none && note_page_ == NotePage::list && !tag_picker_open_;
+    }
 
     void create_fonts() {
         for (HFONT font : {body_font_, small_font_, title_font_}) if (font) DeleteObject(font);
@@ -398,9 +436,11 @@ private:
         body_font_ = make(12, FW_NORMAL);
         small_font_ = make(10, FW_NORMAL);
         title_font_ = make(13, FW_NORMAL);
+        if (row_font_) DeleteObject(row_font_);
+        row_font_ = make(13, FW_NORMAL);
         for (HWND edit : {footer_edit_, title_edit_, body_edit_, operator_edit_, project_edit_, reply_edit_, tag_query_edit_, composer_edit_,
-                          settings_width_edit_, settings_height_edit_, settings_retention_edit_, settings_reply_edit_, settings_presence_edit_,
-                          note_query_edit_, note_find_edit_})
+                          settings_width_edit_, settings_height_edit_, settings_retention_edit_, settings_reply_edit_, presence_edit_,
+                          task_entry_edit_, note_query_edit_, note_find_edit_})
             if (edit) SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(body_font_), TRUE);
     }
     void text(HDC dc, const std::wstring& value, RECT bounds, HFONT font,
@@ -539,34 +579,8 @@ private:
         GetCursorPos(&point);
         busy_menu(point);
     }
-    void select_inbox_chat(std::string chat) {
-        inbox_chat_ = std::move(chat);
-        scroll_[static_cast<int>(Tab::notifications)] = 0;
-        layout();
-    }
-    void inbox_chat_menu() {
-        std::map<std::string, std::size_t> chats;
-        for (const auto* collection : {"requests", "jobs"}) {
-            for (const auto& item : snapshot_[collection]) {
-                if (item.value("archived", false)) continue;
-                auto& pending = chats[get_string(item, "chat")];
-                if (std::string_view(collection) == "requests" && get_string(item, "status") == "pending") ++pending;
-            }
-        }
-        std::vector<MenuItem> items{{1, L"All chats"}, {0, L"", false, true}};
-        std::vector<std::string> labels;
-        for (const auto& [chat, count] : chats) {
-            labels.push_back(chat);
-            items.push_back({static_cast<UINT>(labels.size() + 1),
-                L"@" + shortened(chat, 40) + L"  (" + std::to_wstring(count) + L" pending)"});
-        }
-        POINT point{};
-        GetCursorPos(&point);
-        const int selected = popup_menu(point, items);
-        if (selected == 1) select_inbox_chat({});
-        else if (selected >= 2 && static_cast<std::size_t>(selected - 2) < labels.size())
-            select_inbox_chat(labels[static_cast<std::size_t>(selected - 2)]);
-    }
+
+
     void recover_completions() {
         auto directory = data_directory() / L"completions";
         if (!std::filesystem::exists(directory)) return;
@@ -632,14 +646,20 @@ private:
         Banner banner;
         banner.id = get_string(event, "id");
         banner.title = L"@" + widen(get_string(event, "chat")) + L" - " +
-            (get_string(event, "type") == "request" ? L"permission request" : L"command update");
+            (get_string(event, "type") == "request" ? L"permission request" :
+             get_string(event, "type") == "done" ? L"finished" : L"command update");
         banner.text = widen(get_string(event, "message", get_string(event, "title").c_str()));
         if (banner.text.empty()) banner.text = L"Open Knock to view the update.";
         if (banners_.size() >= 32) banners_.pop_front();
         banners_.push_back(std::move(banner));
         if (!active_banner_) next_banner();
     }
+    int column_width(int full, int percent, int low, int high) const {
+        return std::clamp(full * percent / 100, px(low), px(high));
+    }
     void position_popup() {
+        // The bar sits centred along the top of the monitor with the tray or
+        // pointer, inside the work area so it never covers a top taskbar.
         POINT cursor{};
         GetCursorPos(&cursor);
         NOTIFYICONIDENTIFIER identifier{};
@@ -653,12 +673,14 @@ private:
         MONITORINFO info{};
         info.cbSize = sizeof(info);
         GetMonitorInfoW(monitor, &info);
-        int width = std::min(px(window_settings_.size().width), static_cast<int>(info.rcWork.right - info.rcWork.left) - px(16));
-        int height = std::min(px(window_settings_.size().height), static_cast<int>(info.rcWork.bottom - info.rcWork.top) - px(16));
-        int x = info.rcWork.right - width - px(8);
-        int y = info.rcWork.bottom - height - px(8);
-        if (has_tray && tray.top < info.rcWork.top) y = info.rcWork.top + px(8);
-        if (has_tray && tray.right <= info.rcWork.left) x = info.rcWork.left + px(8);
+        const int work_width = static_cast<int>(info.rcWork.right - info.rcWork.left);
+        const int work_height = static_cast<int>(info.rcWork.bottom - info.rcWork.top);
+        full_width_ = std::min(px(window_settings_.size().width), work_width - px(16));
+        int width = full_width_;
+        if (window_settings_.notes_collapsed()) width -= column_width(full_width_, 17, 220, 320) + px(4);
+        int height = std::min(px(window_settings_.size().height), work_height - px(16));
+        int x = info.rcWork.left + (work_width - width) / 2;
+        int y = info.rcWork.top + px(8);
         SetWindowPos(window_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
     }
     void show(const std::string& focus_id = {}, bool pinned = false, bool inbox = false) {
@@ -672,41 +694,26 @@ private:
             else {
                 detail_ = Detail::none;
                 destroy_detail_edits();
-                tab_ = Tab::notifications;
-                inbox_chat_.clear();
+                reset_tag_picker();
+                if (note_page_ != NotePage::list) close_note_page();
             }
         }
         position_popup();
         layout();
-        if (!focus_id.empty() && !title_needs_attention) {
-            auto found = row_tops_.find(focus_id);
-            if (found != row_tops_.end()) scroll() = std::clamp(found->second, 0, std::max(0, content_height_ - viewport_height_));
-            layout();
-        }
+        if (!focus_id.empty() && !title_needs_attention) scroll_to_card(focus_id);
         ShowWindow(window_, SW_SHOWNORMAL);
         SetForegroundWindow(window_);
         SetFocus(title_needs_attention && title_edit_ ? title_edit_ : window_);
-        update_animation();
         InvalidateRect(window_, nullptr, FALSE);
         InvalidateRect(content_, nullptr, FALSE);
     }
-    void update_animation() {
-        if (IsWindowVisible(window_) && !settings_open_ && tab_ == Tab::notifications && detail_ == Detail::none) {
-            request_sprite_.resume(); complete_sprite_.resume(); note_sprite_.resume();
-            if (request_sprite_.animated() || complete_sprite_.animated() || note_sprite_.animated())
-                SetTimer(window_, 2, 50, nullptr);
-        } else {
-            KillTimer(window_, 2);
-            request_sprite_.pause(); complete_sprite_.pause(); note_sprite_.pause();
-        }
-    }
+
     void hide() {
         if (!save_detail(SaveIntent::background)) return;
         if (reply_edit_) drafts_[reply_id_] = narrow(edit_text(reply_edit_));
         ShowWindow(window_, SW_HIDE);
         keep_open_ = false;
-        KillTimer(window_, 2);
-        request_sprite_.pause(); complete_sprite_.pause(); note_sprite_.pause();
+        save_presence_message(false);
     }
     bool startup_enabled() const {
         wchar_t value[32768]{};
@@ -850,15 +857,12 @@ private:
     }
     void close_settings() {
         if (!settings_open_) return;
-        for (HWND* edit : {&settings_width_edit_, &settings_height_edit_, &settings_retention_edit_, &settings_reply_edit_,
-                           &settings_presence_edit_}) {
+        for (HWND* edit : {&settings_width_edit_, &settings_height_edit_, &settings_retention_edit_, &settings_reply_edit_}) {
             if (*edit) DestroyWindow(*edit);
             *edit = nullptr;
         }
         settings_open_ = false;
         settings_page_ = SettingsPage::general;
-        presence_return_settings_ = false;
-        presence_draft_state_.clear();
         feedback_.clear();
         layout();
         SetFocus(IsWindow(settings_return_focus_) && IsWindowVisible(settings_return_focus_)
@@ -870,11 +874,6 @@ private:
             DestroyWindow(settings_reply_edit_);
             settings_reply_edit_ = nullptr;
         }
-        if (settings_presence_edit_ && page != SettingsPage::presence) {
-            DestroyWindow(settings_presence_edit_);
-            settings_presence_edit_ = nullptr;
-            presence_draft_state_.clear();
-        }
         settings_page_ = page;
         feedback_.clear();
         layout();
@@ -883,60 +882,53 @@ private:
             page == SettingsPage::reply ? settings_reply_edit_ : window_);
     }
     void settings_back() {
-        if (settings_page_ == SettingsPage::presence) {
-            if (presence_return_settings_) {
-                presence_return_settings_ = false;
-                settings_page(presence_return_page_);
-            } else close_settings();
-        }
-        else if (settings_page_ == SettingsPage::reply) settings_page(SettingsPage::replies);
+        if (settings_page_ == SettingsPage::reply) settings_page(SettingsPage::replies);
         else if (settings_page_ == SettingsPage::replies) settings_page(SettingsPage::preferences);
         else if (settings_page_ == SettingsPage::preferences) settings_page(SettingsPage::general);
         else close_settings();
     }
     void open_presence() {
-        if (settings_open_ && settings_page_ == SettingsPage::presence) {
-            SetFocus(settings_presence_edit_);
-            return;
-        }
-        const bool from_settings = settings_open_;
-        const auto previous_page = settings_page_;
-        open_settings();
-        if (!settings_open_) return;
-        presence_return_settings_ = from_settings;
-        presence_return_page_ = previous_page;
-        presence_draft_state_ = get_string(presence(), "state", "unknown");
-        settings_presence_edit_ = make_edit(content_, 45, false, L"Out for coffee...");
-        SendMessageW(settings_presence_edit_, EM_SETLIMITTEXT, 500, 0);
-        // Seed once. Incoming activity must not replace a draft, including an empty one.
-        SetWindowTextW(settings_presence_edit_, widen(get_string(presence(), "message")).c_str());
-        settings_page_ = SettingsPage::presence;
-        feedback_.clear();
-        layout();
-        SetFocus(settings_presence_edit_);
+        // Status lives in its own column now; this just puts the cursor there.
+        if (!presence_edit_) return;
+        SetFocus(presence_edit_);
+        SendMessageW(presence_edit_, EM_SETSEL, 0, -1);
     }
-    void save_presence() {
-        if (!settings_presence_edit_) return;
-        if (presence_draft_state_ != "at_pc" && presence_draft_state_ != "away" && presence_draft_state_ != "busy") {
-            feedback(L"Choose At PC, Away, or Busy first.");
-            return;
-        }
+    std::optional<std::string> presence_text() {
         std::string message;
-        try { message = narrow(edit_text(settings_presence_edit_)); }
+        try { message = narrow(edit_text(presence_edit_)); }
         catch (const std::exception&) {
             feedback(L"Message contains invalid Unicode. Please edit it.");
-            return;
+            return std::nullopt;
         }
         if (message.size() > 500) {
             feedback(L"This message is too long (maximum 500 UTF-8 bytes).");
-            return;
+            return std::nullopt;
         }
-        const auto result = mutate({{"op", "presence.update"}, {"state", presence_draft_state_}, {"message", message}});
+        return message;
+    }
+    void set_presence(const std::string& state) {
+        const auto message = presence_text();
+        if (!message) return;
+        KillTimer(window_, 7);
+        const auto result = mutate({{"op", "presence.update"}, {"state", state}, {"message", *message}});
         if (!result.value("ok", false)) return;
         snapshot_["presence"] = result.at("presence");
+        presence_dirty_ = false;
         update_tray();
-        settings_back();
-        feedback(L"Status saved.");
+        layout();
+    }
+    // Saves a changed message with the current status. Enter, leaving the box,
+    // hiding Knock and a short pause after typing all save it.
+    void save_presence_message(bool explicit_save) {
+        KillTimer(window_, 7);
+        if (!presence_dirty_ || !presence_edit_) return;
+        const auto state = get_string(presence(), "state", "unknown");
+        if (state != "at_pc" && state != "away" && state != "busy") {
+            if (explicit_save) feedback(L"Choose At PC, Away or Busy to share this message.");
+            return;
+        }
+        set_presence(state);
+        if (explicit_save && !presence_dirty_) feedback(L"Status saved.");
     }
     std::vector<std::string> saved_replies() const {
         return preferences().value("saved_replies", std::vector<std::string>{});
@@ -1016,7 +1008,6 @@ private:
         if (target == settings_width_edit_ || target == settings_height_edit_) apply_window_size();
         else if (target == settings_retention_edit_) apply_trash_retention();
         else if (target == settings_reply_edit_ && GetKeyState(VK_CONTROL) < 0) save_saved_reply();
-        else if (target == settings_presence_edit_) save_presence();
         else return false;
         return true;
     }
@@ -1043,8 +1034,8 @@ private:
         feedback(L"Window size saved.");
     }
     void reset_window_size() {
-        SetWindowTextW(settings_width_edit_, L"420");
-        SetWindowTextW(settings_height_edit_, L"510");
+        SetWindowTextW(settings_width_edit_, L"1720");
+        SetWindowTextW(settings_height_edit_, L"380");
         apply_window_size();
     }
 
@@ -1172,33 +1163,70 @@ private:
             layout();
         }
     }
-    void switch_tab(Tab next) {
+    void open_task(const Json& item) {
         if (settings_open_) close_settings();
-        if (next == tab_ && detail_ == Detail::none) return;
-        if (!save_detail()) return;
-        detail_ = Detail::none;
-        destroy_detail_edits();
-        if (footer_edit_) { DestroyWindow(footer_edit_); footer_edit_ = nullptr; }
-        if (reply_edit_) drafts_[reply_id_] = narrow(edit_text(reply_edit_));
-        tab_ = next;
-        layout();
-        SetFocus(window_);
+        if (settings_open_) return;
+        reset_tag_picker();
+        begin_detail(Detail::task, item);
     }
-    void add_item() {
-        if (!footer_edit_) return;
-        std::string title = trim(narrow(edit_text(footer_edit_)));
-        if (title.empty()) { SetFocus(footer_edit_); return; }
-        if (tab_ == Tab::notes && title.front() == '/') { run_note_command(title); return; }
-        auto command = Json{{"op", tab_ == Tab::tasks ? "task.add" : "note.add"}, {"title", title}};
-        if (tab_ == Tab::notes && !note_filter_.empty()) command["tags"] = Json::array({note_filter_});
+    void open_note(const Json& item) {
+        if (settings_open_) close_settings();
+        if (settings_open_) return;
+        reset_tag_picker();
+        begin_detail(Detail::note, item);
+    }
+    void add_task() {
+        std::string title = trim(narrow(edit_text(task_entry_edit_)));
+        if (title.empty()) { SetFocus(task_entry_edit_); return; }
+        if (!mutate({{"op", "task.add"}, {"title", title}}).value("ok", false)) return;
+        SetWindowTextW(task_entry_edit_, L"");
+        tasks_scroll_ = 0;
+        layout();
+    }
+    std::vector<Json> visible_notes() const {
+        std::string query;
+        if (footer_edit_) {
+            try { query = tag_key(trim(narrow(edit_text(footer_edit_)))); } catch (const std::exception&) {}
+        }
+        if (!query.empty() && query.front() == '/') query.clear();
+        std::vector<Json> result;
+        for (auto note = snapshot_["notes"].rbegin(); note != snapshot_["notes"].rend(); ++note) {
+            if (!note_matches(*note)) continue;
+            if (!query.empty()) {
+                auto haystack = tag_key(get_string(*note, "title") + "\n" + get_string(*note, "body"));
+                for (const auto& tag : tags_of(*note)) haystack += "\n" + tag_key(tag);
+                if (haystack.find(query) == std::string::npos) continue;
+            }
+            result.push_back(*note);
+        }
+        return result;
+    }
+    void create_note(std::string title) {
+        auto command = Json{{"op", "note.add"}, {"title", title}};
+        if (!note_filter_.empty()) command["tags"] = Json::array({note_filter_});
         auto result = mutate(command);
         if (!result.value("ok", false)) return;
         SetWindowTextW(footer_edit_, L"");
-        scroll() = 0;
-        if (tab_ == Tab::notes) begin_detail(Detail::note, result["note"]);
+        notes_scroll_ = 0;
+        snapshot_ = store_.snapshot();
+        open_note(result["note"]);
+    }
+    // Enter in the notes search: run a / command, open the best match, or
+    // create a note with that title when nothing matches.
+    void notes_enter() {
+        std::string value = trim(narrow(edit_text(footer_edit_)));
+        if (value.empty()) { SetFocus(footer_edit_); return; }
+        if (value.front() == '/') { run_note_command(value); return; }
+        const auto notes = visible_notes();
+        auto exact = std::find_if(notes.begin(), notes.end(), [&](const Json& note) {
+            return tag_key(get_string(note, "title")) == tag_key(value);
+        });
+        if (exact != notes.end()) open_note(*exact);
+        else if (!notes.empty()) open_note(notes.front());
+        else create_note(value);
     }
     bool note_page_visible() const {
-        return !settings_open_ && tab_ == Tab::notes && detail_ == Detail::none && note_page_ != NotePage::list;
+        return !settings_open_ && detail_ == Detail::none && note_page_ != NotePage::list;
     }
     static const char* note_command_name(NotePage page) {
         switch (page) {
@@ -1303,7 +1331,7 @@ private:
     }
     void update_note_command_choices() {
         note_command_choices_.clear();
-        if (settings_open_ || tab_ != Tab::notes || detail_ != Detail::none || note_page_ != NotePage::list || !footer_edit_) return;
+        if (settings_open_ || detail_ != Detail::none || note_page_ != NotePage::list || !footer_edit_) return;
         const auto value = tag_key(trim(narrow(edit_text(footer_edit_))));
         if (value.empty() || value.front() != '/') return;
         const auto split = value.find_first_of(" \t");
@@ -1527,7 +1555,7 @@ private:
     void select_note_filter(std::string tag, bool untagged = false) {
         note_filter_ = std::move(tag);
         untagged_filter_ = untagged;
-        scroll() = 0;
+        notes_scroll_ = 0;
         close_tag_picker();
     }
     bool set_note_tags(const std::vector<std::string>& tags) {
@@ -2121,13 +2149,7 @@ private:
         reply_edit_ = make_edit(content_, 35, true, L"Not right now, continue with headless tests...");
         SendMessageW(reply_edit_, EM_SETLIMITTEXT, 16000, 0);
         SetWindowTextW(reply_edit_, widen(drafts_[id]).c_str());
-        layout();
-        auto top = row_tops_.find(id);
-        if (top != row_tops_.end()) {
-            for (const auto& row : rows_) if (get_string(row.item, "id") == id && row.top + row.height > scroll() + viewport_height_)
-                scroll() = std::min(row.top, std::max(0, row.top + row.height - viewport_height_));
-            layout();
-        }
+        scroll_to_card(id);
         SetFocus(reply_edit_);
     }
     void cancel_reply(bool keep_draft = true) {
@@ -2151,7 +2173,7 @@ private:
         if (mutate({{"op", "request.resolve"}, {"id", id}, {"decision", decision}}).value("ok", false)
             && reply_id_ == id) cancel_reply(false);
     }
-    void copy(const std::string& value) {
+    void copy(const std::string& value, const wchar_t* done = L"Copied. Paste into the named agent chat.") {
         auto wide = widen(value);
         if (!OpenClipboard(window_)) { feedback(L"Clipboard is busy. Try again."); return; }
         HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, (wide.size() + 1) * sizeof(wchar_t));
@@ -2163,7 +2185,7 @@ private:
         EmptyClipboard();
         if (!SetClipboardData(CF_UNICODETEXT, memory)) GlobalFree(memory);
         CloseClipboard();
-        feedback(L"Copied. Paste into the named agent chat.");
+        feedback(done);
     }
     void view_log(const std::string& path) {
         if (path.empty()) return;
@@ -2175,8 +2197,9 @@ private:
     }
 
     void button(const std::string& key, HWND parent, const std::wstring& label, RECT bounds,
-                std::function<void()> action, bool enabled = true, bool is_tab = false,
-                bool active = false, const Json& card = Json(), Icon icon = Icon::none) {
+                std::function<void()> action, bool enabled = true, bool unused = false,
+                bool active = false, const Json& card = Json()) {
+        (void)unused;
         int id;
         if (auto found = button_keys_.find(key); found != button_keys_.end()) id = found->second;
         else {
@@ -2193,14 +2216,14 @@ private:
         model.seen = true;
         model.label = label;
         model.action = std::move(action);
-        model.tab = is_tab;
         model.active = active;
-        model.card = !card.is_null();
+        model.arrow = key == "notes-toggle";
+        model.close = key.starts_with("card-dismiss:");
+        model.bare = model.arrow || model.close;
         model.left_aligned = key.starts_with("tag-choice:") || key == "tag-all" || key == "tag-untagged" ||
             key == "settings-startup" || key.starts_with("note-command:");
         model.note_result = key.starts_with("note-result:");
         model.record = card;
-        model.icon = icon;
         SetWindowTextW(model.handle, label.c_str());
         EnableWindow(model.handle, enabled);
         SetWindowPos(model.handle, nullptr, bounds.left, bounds.top, bounds.right - bounds.left,
@@ -2218,62 +2241,49 @@ private:
             } else ++it;
         }
     }
-    void draw_tab_icon(HDC dc, Icon icon, int x, int y, COLORREF color) const {
-        HPEN pen = CreatePen(PS_SOLID, std::max(1, px(1)), color);
-        auto old_pen = SelectObject(dc, pen);
-        auto old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-        auto line = [&](int x1, int y1, int x2, int y2) {
-            MoveToEx(dc, x + px(x1), y + px(y1), nullptr);
-            LineTo(dc, x + px(x2), y + px(y2));
-        };
-        if (icon == Icon::tasks) {
-            for (int row : {2, 6, 10}) {
-                fill(dc, rect(x + px(1), y + px(row), px(2), px(2)), color);
-                line(5, row + 1, 13, row + 1);
-            }
-        } else if (icon == Icon::notifications) {
-            const POINT shape[] = {{2, 10}, {3, 8}, {3, 5}, {4, 3}, {6, 2},
-                                   {8, 3}, {9, 5}, {9, 8}, {10, 10}, {2, 10}};
-            MoveToEx(dc, x + px(shape[0].x), y + px(shape[0].y), nullptr);
-            for (std::size_t i = 1; i < std::size(shape); ++i)
-                LineTo(dc, x + px(shape[i].x), y + px(shape[i].y));
-            line(6, 0, 6, 2);
-            line(5, 12, 8, 12);
-        } else if (icon == Icon::notes) {
-            Rectangle(dc, x + px(1), y + px(1), x + px(12), y + px(13));
-            line(2, 9, 4, 9); line(4, 9, 6, 11); line(6, 11, 8, 9); line(8, 9, 11, 9);
-        }
-        SelectObject(dc, old_brush);
-        SelectObject(dc, old_pen);
-        DeleteObject(pen);
-    }
+
     void draw_button(const DRAWITEMSTRUCT& item) {
         auto found = buttons_.find(static_cast<int>(item.CtlID));
         if (found == buttons_.end()) return;
         const auto& button = found->second;
         RECT bounds = item.rcItem;
-        const bool terminal_tab = button.tab && button.icon != Icon::none;
-        RECT popup{};
-        if (terminal_tab) GetClientRect(window_, &popup);
-        const bool compact_tab = terminal_tab && popup.right < px(394);
-        COLORREF bg = button.tab ? (button.active ? background : top_background) : background;
-        if (button.hover || (button.active && !button.tab) || (item.itemState & ODS_SELECTED)) bg = RGB(31, 31, 29);
+        const bool pressed = (item.itemState & ODS_SELECTED) != 0;
         COLORREF color = (item.itemState & ODS_DISABLED) ? subdued : foreground;
-        if (terminal_tab) {
-            fill(item.hDC, bounds, top_background);
-            bg = button.active ? background : button.hover ? RGB(28, 28, 27) : RGB(17, 17, 17);
+        if (button.bare) {
+            fill(item.hDC, bounds, button.arrow ? frame : background);
+            const COLORREF ink = button.hover || pressed ? foreground : RGB(112, 112, 112);
+            if (button.arrow) {
+                // A solid triangle: pointing left collapses the notes, right brings them back.
+                const int size = std::max(3, px(7));
+                const int cx = bounds.right / 2, cy = bounds.bottom / 2;
+                const bool collapse = !window_settings_.notes_collapsed();
+                for (int i = 0; i < size; ++i) {
+                    const int x = collapse ? cx - size / 2 + i : cx + size / 2 - i;
+                    fill(item.hDC, RECT{x, cy - i - 1, x + 1, cy + i + 1}, ink);
+                }
+            } else {
+                text(item.hDC, L"\u00D7", bounds, title_font_, ink, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            }
+        } else {
+            COLORREF bg = button.hover || pressed ? hover_fill : well;
+            fill(item.hDC, bounds, background);
             HBRUSH brush = CreateSolidBrush(bg);
+            HPEN pen = CreatePen(PS_SOLID, 1, button.active ? RGB(120, 120, 116) :
+                (item.itemState & ODS_FOCUS) ? muted : bg);
             auto old_brush = SelectObject(item.hDC, brush);
-            auto old_pen = SelectObject(item.hDC, GetStockObject(NULL_PEN));
-            RoundRect(item.hDC, px(3), 0, bounds.right - px(3), bounds.bottom + px(6), px(8), px(8));
+            auto old_pen = SelectObject(item.hDC, pen);
+            RoundRect(item.hDC, 0, 0, bounds.right, bounds.bottom, px(4), px(4));
+            if (button.active) {
+                RECT inner = bounds;
+                InflateRect(&inner, -1, -1);
+                SelectObject(item.hDC, GetStockObject(NULL_BRUSH));
+                RoundRect(item.hDC, inner.left, inner.top, inner.right, inner.bottom, px(4), px(4));
+            }
             SelectObject(item.hDC, old_pen);
             SelectObject(item.hDC, old_brush);
+            DeleteObject(pen);
             DeleteObject(brush);
-            if (button.active) fill(item.hDC, RECT{0, bounds.bottom - px(2), bounds.right, bounds.bottom}, background);
-            color = button.active || button.hover ? foreground : muted;
-            draw_tab_icon(item.hDC, button.icon, px(compact_tab ? 8 : 12), (bounds.bottom - px(14)) / 2, color);
-        } else fill(item.hDC, bounds, bg);
-        if (!button.tab && !button.bare) outline(item.hDC, bounds, button.hover || (item.itemState & ODS_FOCUS) ? muted : border);
+        }
         if (button.note_result) {
             const bool deleting = note_page_ == NotePage::remove;
             text(item.hDC, widen(get_string(button.record, "title")),
@@ -2289,44 +2299,109 @@ private:
             if (caption.empty()) caption = L"Untagged";
             text(item.hDC, caption, RECT{px(8), px(28), bounds.right - px(8), bounds.bottom - px(5)},
                 small_font_, muted, (note_page_ == NotePage::search ? DT_WORDBREAK : DT_SINGLELINE) | DT_END_ELLIPSIS | DT_NOPREFIX);
-        } else if (button.card) {
-            auto title = (tab_ == Tab::tasks ? L"TASK: " : L"") + widen(get_string(button.record, "title"));
-            RECT title_bounds{px(7), px(6), bounds.right - px(7), px(25)};
-            text(item.hDC, title, title_bounds, title_font_, foreground, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-            RECT body_bounds{px(7), px(26), bounds.right - px(7), bounds.bottom - px(24)};
-            text(item.hDC, widen(get_string(button.record, "body")), body_bounds, small_font_, foreground,
-                 DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX);
-            std::wstring meta;
-            if (tab_ == Tab::tasks) {
-                auto status = get_string(button.record, "status", "todo");
-                meta = status == "done" ? L"DONE" : status == "in_progress" ? L"IN PROGRESS" : L"TO DO";
-                meta += L"  OPERATOR: " + widen(get_string(button.record, "operator", "ME"));
-                auto project = get_string(button.record, "project");
-                if (!project.empty()) meta += L"  PROJECT: " + widen(project);
-                fill(item.hDC, rect(px(8), bounds.bottom - px(13), px(2), px(2)), status == "done" ? muted : orange);
-                text(item.hDC, meta, RECT{px(15), bounds.bottom - px(20), bounds.right - px(7), bounds.bottom - px(4)},
-                     small_font_, muted, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-            } else {
-                auto tags = tag_caption(tags_of(button.record));
-                if (tags.empty()) tags = L"Untagged";
-                text(item.hDC, tags, RECT{px(8), bounds.bottom - px(20), bounds.right - px(94), bounds.bottom - px(4)},
-                     small_font_, muted, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-                text(item.hDC, display_time(button.record.value("updated_at", std::int64_t(0))),
-                     RECT{bounds.right - px(90), bounds.bottom - px(20), bounds.right - px(7), bounds.bottom - px(4)},
-                     small_font_, subdued, DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-            }
-        } else {
-            if (terminal_tab) { bounds.left = px(compact_tab ? 29 : 33); bounds.right -= px(compact_tab ? 6 : 8); }
-            else if (button.left_aligned && !button.bare) { bounds.left = px(8); bounds.right -= px(8); }
+        } else if (!button.bare) {
+            if (button.left_aligned) { bounds.left = px(8); bounds.right -= px(8); }
             else InflateRect(&bounds, -px(3), 0);
-            text(item.hDC, button.label, bounds, button.bare ? title_font_ : button.tab && !terminal_tab ? small_font_ : body_font_, color,
-                 (terminal_tab || button.left_aligned ? DT_LEFT : DT_CENTER) | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            text(item.hDC, button.label, bounds, body_font_, color,
+                 (button.left_aligned ? DT_LEFT : DT_CENTER) | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         }
-        if ((item.itemState & ODS_FOCUS) && !(item.itemState & ODS_NOFOCUSRECT)) {
+        if ((item.itemState & ODS_FOCUS) && !(item.itemState & ODS_NOFOCUSRECT) && button.bare) {
             RECT focus = item.rcItem;
-            InflateRect(&focus, -px(3), -px(3));
+            InflateRect(&focus, -px(2), -px(2));
             DrawFocusRect(item.hDC, &focus);
         }
+    }
+
+    // ------------------------------------------------------------ pixel text and characters
+    int pixel_scale(double logical) const {
+        return std::max(1, static_cast<int>(std::lround(logical * static_cast<double>(dpi_) / 96.0)));
+    }
+    static bool pixel_printable(const std::wstring& value) {
+        return std::all_of(value.begin(), value.end(), [](wchar_t c) { return c >= 32 && c < 127; });
+    }
+    static int pixel_width(const std::wstring& value, int scale) {
+        return value.empty() ? 0 : static_cast<int>(value.size()) * (pixel_glyph_width + 1) * scale - scale;
+    }
+    // Draws a heading in the bitmap font, shortened with ".." to fit. Text the
+    // font cannot show (non-ASCII job names) falls back to the title font.
+    int pixel_text(HDC dc, std::wstring value, RECT box, int scale, COLORREF color, bool center) const {
+        if (!pixel_printable(value)) {
+            text(dc, value, box, title_font_, color, (center ? DT_CENTER : DT_LEFT) | DT_VCENTER | DT_SINGLELINE |
+                 DT_END_ELLIPSIS | DT_NOPREFIX);
+            return box.right - box.left;
+        }
+        const int available = box.right - box.left;
+        if (pixel_width(value, scale) > available) {
+            while (value.size() > 1 && pixel_width(value + L"..", scale) > available) value.pop_back();
+            value += L"..";
+        }
+        const int width = pixel_width(value, scale);
+        const int x0 = center ? box.left + (available - width) / 2 : box.left;
+        const int y0 = box.top + ((box.bottom - box.top) - pixel_glyph_height * scale) / 2;
+        HBRUSH brush = CreateSolidBrush(color);
+        for (std::size_t i = 0; i < value.size(); ++i) {
+            const auto* glyph = pixel_glyph(static_cast<char32_t>(value[i]));
+            if (!glyph) continue;
+            for (int row = 0; row < pixel_glyph_height; ++row) {
+                for (int column = 0; column < pixel_glyph_width; ++column) {
+                    if (!(glyph[row] & (1 << (pixel_glyph_width - 1 - column)))) continue;
+                    const int x = x0 + (static_cast<int>(i) * (pixel_glyph_width + 1) + column) * scale;
+                    const int y = y0 + row * scale;
+                    RECT dot{x, y, x + scale, y + scale};
+                    FillRect(dc, &dot, brush);
+                }
+            }
+        }
+        DeleteObject(brush);
+        return width;
+    }
+    const Character& character_for(const std::string& chat) {
+        auto found = characters_.find(chat);
+        if (found == characters_.end()) found = characters_.emplace(chat, make_character(chat)).first;
+        return found->second;
+    }
+    void draw_character(HDC dc, const Character& character, RECT box) const {
+        // Fit the drawn pixels, not the whole canvas, so every creature fills its space.
+        int left = Character::width, top = Character::height, right = -1, bottom = -1;
+        for (int y = 0; y < Character::height; ++y)
+            for (int x = 0; x < Character::width; ++x)
+                if (character.at(x, y)) {
+                    left = std::min(left, x); right = std::max(right, x);
+                    top = std::min(top, y); bottom = std::max(bottom, y);
+                }
+        if (right < 0) return;
+        const int columns = right - left + 1, rows = bottom - top + 1;
+        const int scale = std::max(1, std::min({static_cast<int>(box.right - box.left) / columns,
+                                                static_cast<int>(box.bottom - box.top) / rows, px(9)}));
+        const int x0 = box.left + ((box.right - box.left) - columns * scale) / 2 - left * scale;
+        const int y0 = box.top + ((box.bottom - box.top) - rows * scale) / 2 - top * scale;
+        HBRUSH brushes[std::tuple_size_v<decltype(character.palette)>]{};
+        for (std::size_t i = 1; i < character.palette.size(); ++i) {
+            const auto color = character.palette[i];
+            brushes[i] = CreateSolidBrush(RGB((color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF));
+        }
+        for (int y = 0; y < Character::height; ++y) {
+            for (int x = 0; x < Character::width;) {
+                const auto value = character.at(x, y);
+                int run = 1;
+                while (x + run < Character::width && character.at(x + run, y) == value) ++run;
+                if (value) {
+                    RECT block{x0 + x * scale, y0 + y * scale, x0 + (x + run) * scale, y0 + (y + 1) * scale};
+                    FillRect(dc, &block, brushes[value]);
+                }
+                x += run;
+            }
+        }
+        for (auto brush : brushes) if (brush) DeleteObject(brush);
+    }
+    void rounded(HDC dc, RECT box, COLORREF color, int radius) const {
+        HBRUSH brush = CreateSolidBrush(color);
+        auto old_brush = SelectObject(dc, brush);
+        auto old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+        RoundRect(dc, box.left, box.top, box.right + 1, box.bottom + 1, radius, radius);
+        SelectObject(dc, old_pen);
+        SelectObject(dc, old_brush);
+        DeleteObject(brush);
     }
 
     void layout() {
@@ -2334,105 +2409,139 @@ private:
         for (auto& [id, model] : buttons_) { (void)id; model.seen = false; }
         RECT client{};
         GetClientRect(window_, &client);
-        int width = client.right;
-        int height = client.bottom;
-        const Tab tabs[] = {Tab::tasks, Tab::notifications, Tab::notes};
-        const wchar_t* labels[] = {L"Task List", L"Notifications", L"Notes"};
-        const Icon icons[] = {Icon::tasks, Icon::notifications, Icon::notes};
-        const int widths[] = {120, 142, 104};
-        int tab_x = px(10);
+        const int width = client.right;
+        const int height = client.bottom;
+        const int full = full_width_ ? full_width_ : width;
+        const bool collapsed = window_settings_.notes_collapsed();
+        const int margin = px(10), gap = px(14);
+        const int tasks_w = column_width(full, 17, 220, 320);
+        const int notes_w = column_width(full, 17, 220, 320);
+        const int presence_w = column_width(full, 13, 190, 250);
+        arrow_rect_ = RECT{width - px(24), 1, width - 1, height - 1};
+        notes_rect_ = collapsed ? RECT{} : RECT{arrow_rect_.left - px(4) - notes_w, margin, arrow_rect_.left - px(4), height - margin};
+        const int presence_right = collapsed ? arrow_rect_.left - gap : notes_rect_.left - gap;
+        presence_rect_ = RECT{presence_right - presence_w, margin, presence_right, height - margin};
+        tasks_rect_ = RECT{margin, margin, margin + tasks_w, height - margin};
+        middle_rect_ = RECT{tasks_rect_.right + gap + px(8), margin, presence_rect_.left - gap, height - margin};
+        const int header = px(34);
+
+        // Task column: heading, the list and a field for a new task.
+        task_entry_bounds_ = RECT{tasks_rect_.left, tasks_rect_.bottom - px(26), tasks_rect_.right, tasks_rect_.bottom};
+        MoveWindow(task_entry_edit_, task_entry_bounds_.left + px(4), task_entry_bounds_.top + px(3),
+                   tasks_w - px(8), px(20), FALSE);
+        MoveWindow(tasks_view_, tasks_rect_.left, tasks_rect_.top + header, tasks_w,
+                   std::max(px(20), static_cast<int>(task_entry_bounds_.top) - px(6) - static_cast<int>(tasks_rect_.top + header)), FALSE);
+        layout_tasks_panel();
+
+        // Status column: three choices and an optional message.
+        const char* states[]{"at_pc", "away", "busy"};
+        const wchar_t* labels[]{L"AT PC", L"AWAY", L"BUSY"};
+        const int choice_gap = px(6);
+        const int choice_w = (presence_w - 2 * choice_gap) / 3;
+        const auto current = get_string(presence(), "state", "unknown");
         for (int i = 0; i < 3; ++i) {
-            Tab next = tabs[i];
-            int tab_width = MulDiv(widths[i], std::min(width - px(20), px(374)), 374);
-            button("tab" + std::to_string(static_cast<int>(next)), window_, labels[i],
-                rect(tab_x, px(8), tab_width, px(26)), [this, next] { switch_tab(next); },
-                true, true, !settings_open_ && tab_ == next, Json(), icons[i]);
-            tab_x += tab_width + px(4);
+            const std::string state = states[i];
+            button("presence-state:" + state, window_, labels[i],
+                rect(presence_rect_.left + i * (choice_w + choice_gap), presence_rect_.top, choice_w, px(28)),
+                [this, state] { set_presence(state); }, true, false, current == state);
         }
-        int top = px(44);
-        presence_bar_y_ = 0;
-        if (!settings_open_) {
-            presence_bar_y_ = top;
-            button("presence", window_, presence_caption(), rect(px(12), top, px(96), px(20)),
-                   [this] { open_presence(); });
-            top += px(24);
-        }
-        bool has_lease = snapshot_.contains("lease") && !snapshot_["lease"].is_null();
-        lease_bar_y_ = 0;
-        if (has_lease) {
-            lease_bar_y_ = top;
-            button("release", window_, L"RELEASE", rect(width - px(80), top, px(68), px(20)), [this] {
+        presence_box_ = RECT{presence_rect_.left, presence_rect_.top + px(52), presence_rect_.right,
+                             presence_rect_.top + px(52) + std::clamp(height / 4, px(56), px(96))};
+        MoveWindow(presence_edit_, presence_box_.left + px(4), presence_box_.top + px(4),
+                   presence_w - px(8), presence_box_.bottom - presence_box_.top - px(8), FALSE);
+        int line = presence_box_.bottom + px(10);
+        lease_line_y_ = 0;
+        if (snapshot_.contains("lease") && !snapshot_["lease"].is_null()) {
+            lease_line_y_ = line;
+            button("release", window_, L"RELEASE", rect(presence_rect_.right - px(76), line, px(76), px(22)), [this] {
                 if (!snapshot_["lease"].is_null()) mutate({{"op", "request.release"}, {"id", snapshot_["lease"]["id"]}});
             });
-            top += px(28);
+            line += px(46);
         }
-        busy_bar_y_ = 0;
-        if (busy() && !settings_open_) {
-            busy_bar_y_ = top;
-            button("busy-end", window_, L"END", rect(width - px(65), top, px(53), px(20)),
+        quiet_line_y_ = 0;
+        if (busy()) {
+            quiet_line_y_ = line;
+            button("busy-end", window_, L"END", rect(presence_rect_.right - px(52), line, px(52), px(22)),
                    [this] { set_busy_minutes(0); });
-            top += px(28);
         }
-        inbox_bar_y_ = 0;
-        if (!settings_open_ && tab_ == Tab::notifications && detail_ == Detail::none) {
-            inbox_bar_y_ = top;
-            button("inbox-chats", window_, L"CHATS", rect(px(12), top, px(64), px(22)),
-                   [this] { inbox_chat_menu(); });
-            if (!inbox_chat_.empty()) button("inbox-all", window_, L"ALL CHATS", rect(width - px(100), top, px(88), px(22)),
-                   [this] { select_inbox_chat({}); });
-            top += px(31);
-        }
-        bool footer = !settings_open_ && tab_ != Tab::notifications && detail_ == Detail::none && !note_page_visible();
-        notes_bar_y_ = 0;
-        if (!settings_open_ && tab_ == Tab::notes && detail_ == Detail::none && !note_page_visible()) {
-            notes_bar_y_ = top;
-            button("notes-filter", window_, L"FILTER", rect(px(12), top, px(64), px(22)),
-                [this] { open_tag_picker(); }, true, false, tag_picker_open_);
-            visible_note_count_ = static_cast<std::size_t>(std::count_if(snapshot_["notes"].begin(), snapshot_["notes"].end(),
-                [this](const Json& note) { return note_matches(note); }));
-            top += px(31);
-        }
-        update_note_command_choices();
+
+        // Notes column: heading with search, an optional filter line and the list.
+        const bool notes_shown = !collapsed;
+        ShowWindow(footer_edit_, notes_shown ? SW_SHOW : SW_HIDE);
+        filter_line_y_ = 0;
         note_command_bounds_ = {};
-        int suggestions_height = 0;
-        const bool show_note_undo = !settings_open_ && tab_ == Tab::notes && detail_ == Detail::none &&
-            !tag_picker_open_ && !note_undo_id_.empty() && GetTickCount64() < note_undo_until_;
-        note_command_visible_ = 0;
-        if (footer && tab_ == Tab::notes && footer_edit_) {
-            const auto value = trim(narrow(edit_text(footer_edit_)));
-            if (!value.empty() && value.front() == '/') {
-                const int available = std::max(px(39), height - top - px(44) - px(80) - (show_note_undo ? px(30) : 0));
+        note_undo_bounds_ = {};
+        if (notes_shown) {
+            const int heading_w = pixel_width(L"NOTES", pixel_scale(2.0)) + px(12);
+            search_bounds_ = RECT{notes_rect_.left + heading_w, notes_rect_.top + px(3),
+                                  notes_rect_.right - px(54), notes_rect_.top + px(27)};
+            MoveWindow(footer_edit_, search_bounds_.left + px(22), search_bounds_.top + px(3),
+                       std::max(px(20), static_cast<int>(search_bounds_.right - search_bounds_.left) - px(30)), px(18), FALSE);
+            button("notes-filter", window_, L"#", rect(notes_rect_.right - px(50), notes_rect_.top + px(3), px(24), px(24)),
+                   [this] { open_tag_picker(); }, true, false, !note_filter_.empty() || untagged_filter_);
+            button("notes-new", window_, L"+", rect(notes_rect_.right - px(24), notes_rect_.top + px(3), px(24), px(24)), [this] {
+                std::string title;
+                try { title = trim(narrow(edit_text(footer_edit_))); } catch (const std::exception&) {}
+                create_note(title.empty() || title.front() == '/' ? "New note" : title);
+            });
+            int list_top = notes_rect_.top + header;
+            if (!note_filter_.empty() || untagged_filter_) {
+                filter_line_y_ = list_top;
+                button("notes-filter-clear", window_, L"CLEAR", rect(notes_rect_.right - px(58), list_top, px(58), px(20)),
+                       [this] { note_filter_.clear(); untagged_filter_ = false; notes_scroll_ = 0; layout(); });
+                list_top += px(26);
+            }
+            int list_bottom = notes_rect_.bottom;
+            if (dashboard() || detail_ != Detail::note) {
+                if (!note_undo_id_.empty() && GetTickCount64() < note_undo_until_) {
+                    note_undo_bounds_ = RECT{notes_rect_.left, list_bottom - px(24), notes_rect_.right, list_bottom};
+                    const auto id = note_undo_id_;
+                    button("note-undo", window_, L"UNDO", rect(notes_rect_.right - px(56), list_bottom - px(24), px(56), px(23)),
+                           [this, id] { restore_note(id); });
+                    list_bottom -= px(30);
+                }
+            }
+            update_note_command_choices();
+            note_command_visible_ = 0;
+            if (!note_command_choices_.empty() || (GetFocus() == footer_edit_ && [&] {
+                    try { auto v = trim(narrow(edit_text(footer_edit_))); return !v.empty() && v.front() == '/'; }
+                    catch (const std::exception&) { return false; } }())) {
+                const int available = list_bottom - list_top;
                 note_command_visible_ = std::min(note_command_choices_.size(),
                     static_cast<std::size_t>(std::max(1, (available - px(10)) / px(29))));
                 if (note_command_selection_ < note_command_first_) note_command_first_ = note_command_selection_;
                 if (note_command_visible_ && note_command_selection_ >= note_command_first_ + note_command_visible_)
                     note_command_first_ = note_command_selection_ - note_command_visible_ + 1;
                 note_command_first_ = std::min(note_command_first_, note_command_choices_.size() - note_command_visible_);
-                suggestions_height = note_command_choices_.empty() ? std::min(px(49), available) :
-                    px(10 + 29 * static_cast<int>(note_command_visible_));
-                note_command_bounds_ = RECT{px(12), height - px(44) - suggestions_height, width - px(12), height - px(47)};
+                const int box_height = note_command_choices_.empty() ? px(49) : px(10 + 29 * static_cast<int>(note_command_visible_));
+                note_command_bounds_ = RECT{notes_rect_.left, list_top, notes_rect_.right, list_top + box_height};
+                for (std::size_t i = note_command_first_; i < note_command_first_ + note_command_visible_; ++i) {
+                    const auto page = note_command_choices_[i];
+                    const auto label = widen(note_command_name(page)) + note_command_description(page);
+                    button("note-command:" + std::string(note_command_name(page)), window_, label,
+                        rect(note_command_bounds_.left + px(4), note_command_bounds_.top + px(4) + static_cast<int>(i - note_command_first_) * px(29),
+                             note_command_bounds_.right - note_command_bounds_.left - px(8), px(23)),
+                        [this, page] {
+                            const auto value = trim(narrow(edit_text(footer_edit_)));
+                            const auto split = value.find_first_of(" \t");
+                            open_note_page(page, split == std::string::npos ? std::string() : trim(value.substr(split + 1)));
+                        }, true, false, i == note_command_selection_);
+                }
             }
-        }
-        int bottom = footer ? px(44) + suggestions_height : px(12);
-        note_undo_bounds_ = {};
-        if (show_note_undo) {
-            const int undo_top = height - bottom - px(28);
-            note_undo_bounds_ = RECT{px(12), undo_top, width - px(12), undo_top + px(24)};
-            const auto id = note_undo_id_;
-            button("note-undo", window_, L"UNDO", rect(width - px(66), undo_top, px(54), px(23)),
-                   [this, id] { restore_note(id); });
-            bottom += px(30);
-        }
-        MoveWindow(content_, px(12), top, width - px(24), std::max(px(80), height - top - bottom), FALSE);
+            MoveWindow(notes_view_, notes_rect_.left, list_top, notes_w, std::max(px(20), list_bottom - list_top), FALSE);
+            ShowWindow(notes_view_, note_command_bounds_.bottom > note_command_bounds_.top ? SW_HIDE : SW_SHOW);
+            layout_notes_panel();
+        } else ShowWindow(notes_view_, SW_HIDE);
+        button("notes-toggle", window_, collapsed ? L"SHOW NOTES" : L"HIDE NOTES",
+               rect(arrow_rect_.left + 1, arrow_rect_.top, arrow_rect_.right - arrow_rect_.left - 1, arrow_rect_.bottom - arrow_rect_.top),
+               [this] { toggle_notes(); });
+
+        // The middle column shows the job cards, or the page opened from a side panel.
+        MoveWindow(content_, middle_rect_.left, middle_rect_.top, middle_rect_.right - middle_rect_.left,
+                   middle_rect_.bottom - middle_rect_.top, FALSE);
         RECT area{};
         GetClientRect(content_, &area);
         viewport_height_ = area.bottom;
-        if (footer) {
-            if (!footer_edit_) footer_edit_ = make_edit(window_, 30, false,
-                tab_ == Tab::tasks ? L"New task..." : L"New note, or / for commands...");
-            MoveWindow(footer_edit_, px(12), height - px(30), width - px(91), px(22), FALSE);
-            ShowWindow(footer_edit_, SW_SHOW);
-        } else if (footer_edit_) ShowWindow(footer_edit_, SW_HIDE);
         if (note_query_edit_) ShowWindow(note_query_edit_, note_page_visible() ? SW_SHOW : SW_HIDE);
         if (note_find_edit_) ShowWindow(note_find_edit_, !settings_open_ && detail_ == Detail::note &&
             !note_metadata_open_ && !tag_picker_open_ && note_find_open_ ? SW_SHOW : SW_HIDE);
@@ -2442,31 +2551,202 @@ private:
             layout_settings(area);
         }
         else if (detail_ != Detail::none) layout_detail(area);
-        else if (tab_ == Tab::notifications) layout_notifications(area);
         else if (note_page_visible()) layout_note_page(area);
         else if (tag_picker_open_) { content_height_ = area.bottom; layout_tag_picker(area); }
-        else layout_cards(area);
-        if (suggestions_height && !note_command_choices_.empty()) {
-            for (std::size_t i = note_command_first_; i < note_command_first_ + note_command_visible_; ++i) {
-                const auto page = note_command_choices_[i];
-                const auto label = widen(note_command_name(page)) + note_command_description(page);
-                button("note-command:" + std::string(note_command_name(page)), window_, label,
-                    rect(note_command_bounds_.left + px(4), note_command_bounds_.top + px(4) + static_cast<int>(i - note_command_first_) * px(29),
-                         note_command_bounds_.right - note_command_bounds_.left - px(10), px(23)),
-                    [this, page] {
-                        const auto value = trim(narrow(edit_text(footer_edit_)));
-                        const auto split = value.find_first_of(" \t");
-                        open_note_page(page, split == std::string::npos ? std::string() : trim(value.substr(split + 1)));
-                    }, true, false, i == note_command_selection_);
-            }
-        }
-        if (reply_edit_ && (settings_open_ || tab_ != Tab::notifications || detail_ != Detail::none))
-            ShowWindow(reply_edit_, SW_HIDE);
+        else layout_dashboard(area);
+        if (reply_edit_ && !dashboard()) ShowWindow(reply_edit_, SW_HIDE);
         sweep_buttons();
         InvalidateRect(window_, nullptr, FALSE);
-        InvalidateRect(content_, nullptr, FALSE);
         RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
-        update_animation();
+    }
+    void toggle_notes() {
+        if (!window_settings_.set_notes_collapsed(!window_settings_.notes_collapsed()))
+            feedback(window_settings_.error());
+        position_popup();
+        layout();
+    }
+
+    // ------------------------------------------------------------ side panels
+    int line_height(HFONT font) const { return text_height(L"Ag", px(200), font); }
+    void layout_tasks_panel() {
+        RECT area{};
+        GetClientRect(tasks_view_, &area);
+        task_rows_.clear();
+        int y = 0;
+        const int title_lines = line_height(row_font_);
+        for (auto task = snapshot_["tasks"].rbegin(); task != snapshot_["tasks"].rend(); ++task) {
+            const int title = std::min(text_height(widen(get_string(*task, "title")), area.right - px(18), row_font_, title_lines),
+                                       title_lines * 2);
+            const int height = px(10) + title + px(6) + line_height(small_font_) + px(8);
+            task_rows_.push_back({*task, y, height});
+            y += height + px(6);
+        }
+        tasks_extent_ = y;
+        tasks_scroll_ = std::clamp(tasks_scroll_, 0, std::max(0, tasks_extent_ - static_cast<int>(area.bottom)));
+        InvalidateRect(tasks_view_, nullptr, FALSE);
+    }
+    void layout_notes_panel() {
+        RECT area{};
+        GetClientRect(notes_view_, &area);
+        note_list_rows_.clear();
+        int y = 0;
+        const int title_lines = line_height(row_font_);
+        for (const auto& note : visible_notes()) {
+            const int title = std::min(text_height(widen(get_string(note, "title")), area.right - px(30), row_font_, title_lines),
+                                       title_lines * 2);
+            const int height = px(8) + title + px(8) + line_height(small_font_) + px(8);
+            note_list_rows_.push_back({note, y, height});
+            y += height;
+        }
+        notes_extent_ = y;
+        notes_scroll_ = std::clamp(notes_scroll_, 0, std::max(0, notes_extent_ - static_cast<int>(area.bottom)));
+        InvalidateRect(notes_view_, nullptr, FALSE);
+    }
+    void draw_panel_scroll(HDC dc, RECT area, int extent, int offset) const {
+        if (extent <= area.bottom) return;
+        const int thumb = std::max(px(20), static_cast<int>(area.bottom) * static_cast<int>(area.bottom) / extent);
+        const int top = (area.bottom - thumb) * offset / std::max(1, extent - static_cast<int>(area.bottom));
+        fill(dc, RECT{area.right - std::max(2, px(2)), top, area.right, top + thumb}, RGB(70, 70, 70));
+    }
+    void draw_tasks_panel(HDC dc) {
+        RECT area{};
+        GetClientRect(tasks_view_, &area);
+        fill(dc, area, frame);
+        if (task_rows_.empty()) {
+            text(dc, L"No tasks yet.", RECT{px(4), px(6), area.right, px(30)}, row_font_, foreground);
+            text(dc, L"Add one below, or let an agent add it with knock tasks add.",
+                 RECT{px(4), px(32), area.right - px(4), px(90)}, small_font_, muted);
+            return;
+        }
+        const int title_lines = line_height(row_font_);
+        for (std::size_t i = 0; i < task_rows_.size(); ++i) {
+            const auto& row = task_rows_[i];
+            const int top = row.top - tasks_scroll_;
+            if (top + row.height < 0 || top > area.bottom) continue;
+            const RECT box{0, top, area.right - px(6), top + row.height};
+            fill(dc, box, static_cast<int>(i) == hover_task_ ? RGB(31, 31, 31) : well);
+            text(dc, widen(get_string(row.item, "title")),
+                 RECT{px(9), top + px(10), box.right - px(9), top + px(10) + std::min(row.height - px(24), title_lines * 2)},
+                 row_font_, foreground, DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX | DT_EDITCONTROL);
+            const auto status = get_string(row.item, "status", "todo");
+            const COLORREF dot = status == "done" ? green : status == "in_progress" ? blue : orange;
+            std::wstring meta = status == "done" ? L"DONE" : status == "in_progress" ? L"IN-PROGRESS" : L"TO-DO";
+            meta += L"  OPERATOR:" + widen(get_string(row.item, "operator", "ME"));
+            const auto project = get_string(row.item, "project");
+            if (!project.empty()) meta += L"  PROJECT: " + widen(project);
+            const int meta_y = box.bottom - px(8) - line_height(small_font_);
+            fill(dc, rect(px(9), meta_y + line_height(small_font_) / 2 - px(2), px(4), px(4)), dot);
+            text(dc, meta, RECT{px(17), meta_y, box.right - px(6), box.bottom - px(6)}, small_font_, subdued,
+                 DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        }
+        draw_panel_scroll(dc, area, tasks_extent_, tasks_scroll_);
+    }
+    void draw_notes_panel(HDC dc) {
+        RECT area{};
+        GetClientRect(notes_view_, &area);
+        fill(dc, area, background);
+        if (note_list_rows_.empty()) {
+            const bool any = !snapshot_["notes"].empty();
+            text(dc, any ? L"No matching notes." : L"No notes yet.", RECT{px(4), px(6), area.right, px(30)}, row_font_, foreground);
+            text(dc, any ? L"Press Enter in search to create a note with that title." :
+                 L"Type a title in search and press Enter, or use +.",
+                 RECT{px(4), px(32), area.right - px(4), px(90)}, small_font_, muted);
+            return;
+        }
+        const int title_lines = line_height(row_font_);
+        for (std::size_t i = 0; i < note_list_rows_.size(); ++i) {
+            const auto& row = note_list_rows_[i];
+            const int top = row.top - notes_scroll_;
+            if (top + row.height < 0 || top > area.bottom) continue;
+            const RECT box{0, top, area.right - px(4), top + row.height};
+            if (static_cast<int>(i) == hover_note_) fill(dc, box, RGB(38, 38, 38));
+            text(dc, widen(get_string(row.item, "title")),
+                 RECT{px(4), top + px(8), box.right - px(22), top + px(8) + std::min(row.height - px(24), title_lines * 2)},
+                 row_font_, RGB(200, 200, 194), DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX | DT_EDITCONTROL);
+            auto tags = tag_caption(tags_of(row.item));
+            if (tags.empty()) tags = L"Untagged";
+            const int meta_y = box.bottom - px(8) - line_height(small_font_);
+            text(dc, tags, RECT{px(4), meta_y, box.right - px(110), box.bottom}, small_font_, subdued,
+                 DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            std::time_t time = static_cast<std::time_t>(row.item.value("updated_at", std::int64_t(0)) / 1000);
+            std::tm local{};
+            localtime_s(&local, &time);
+            wchar_t date[32]{};
+            std::wcsftime(date, 32, L"%d %b, %H:%M", &local);
+            text(dc, date, RECT{box.right - px(110), meta_y, box.right - px(22), box.bottom}, small_font_, subdued,
+                 DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
+            text(dc, L">", RECT{box.right - px(18), top, box.right - px(4), box.bottom}, row_font_, subdued,
+                 DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            fill(dc, RECT{0, box.bottom - 1, box.right, box.bottom}, divider);
+        }
+        draw_panel_scroll(dc, area, notes_extent_, notes_scroll_);
+    }
+    int panel_row_at(HWND panel, int y) const {
+        const auto& rows = panel == tasks_view_ ? task_rows_ : note_list_rows_;
+        const int offset = y + (panel == tasks_view_ ? tasks_scroll_ : notes_scroll_);
+        for (std::size_t i = 0; i < rows.size(); ++i)
+            if (offset >= rows[i].top && offset < rows[i].top + rows[i].height) return static_cast<int>(i);
+        return -1;
+    }
+    LRESULT panel_message(HWND target, UINT message, WPARAM wparam, LPARAM lparam) {
+        const bool tasks = target == tasks_view_;
+        switch (message) {
+        case WM_PAINT: {
+            PAINTSTRUCT state{};
+            HDC dc = BeginPaint(target, &state);
+            RECT area{};
+            GetClientRect(target, &area);
+            HDC buffer = CreateCompatibleDC(dc);
+            HBITMAP bitmap = CreateCompatibleBitmap(dc, std::max(1L, area.right), std::max(1L, area.bottom));
+            auto old = SelectObject(buffer, bitmap);
+            if (tasks) draw_tasks_panel(buffer); else draw_notes_panel(buffer);
+            BitBlt(dc, 0, 0, area.right, area.bottom, buffer, 0, 0, SRCCOPY);
+            SelectObject(buffer, old);
+            DeleteObject(bitmap);
+            DeleteDC(buffer);
+            EndPaint(target, &state);
+            return 0;
+        }
+        case WM_ERASEBKGND: return 1;
+        case WM_MOUSEWHEEL: {
+            RECT area{};
+            GetClientRect(target, &area);
+            int& offset = tasks ? tasks_scroll_ : notes_scroll_;
+            const int extent = tasks ? tasks_extent_ : notes_extent_;
+            offset = std::clamp(offset - GET_WHEEL_DELTA_WPARAM(wparam) * px(48) / WHEEL_DELTA, 0,
+                                std::max(0, extent - static_cast<int>(area.bottom)));
+            InvalidateRect(target, nullptr, FALSE);
+            return 0;
+        }
+        case WM_MOUSEMOVE: {
+            int& hover = tasks ? hover_task_ : hover_note_;
+            const int row = panel_row_at(target, GET_Y_LPARAM(lparam));
+            if (row != hover) {
+                hover = row;
+                TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, target, 0};
+                TrackMouseEvent(&track);
+                InvalidateRect(target, nullptr, FALSE);
+            }
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            (tasks ? hover_task_ : hover_note_) = -1;
+            InvalidateRect(target, nullptr, FALSE);
+            return 0;
+        case WM_LBUTTONUP: {
+            const int row = panel_row_at(target, GET_Y_LPARAM(lparam));
+            if (row < 0) return 0;
+            const auto item = (tasks ? task_rows_ : note_list_rows_)[static_cast<std::size_t>(row)].item;
+            if (tasks) open_task(item); else open_note(item);
+            return 0;
+        }
+        case WM_SETCURSOR:
+            SetCursor(LoadCursorW(nullptr, IDC_HAND));
+            return TRUE;
+        case WM_CONTEXTMENU: app_context_menu(target, lparam); return 0;
+        case WM_KEYDOWN: if (wparam == VK_ESCAPE) { escape(); return 0; } break;
+        }
+        return DefWindowProcW(target, message, wparam, lparam);
     }
     void layout_settings(RECT area) {
         content_height_ = area.bottom;
@@ -2474,29 +2754,8 @@ private:
             if (edit) ShowWindow(edit, settings_page_ == SettingsPage::general ? SW_SHOW : SW_HIDE);
         if (settings_retention_edit_) ShowWindow(settings_retention_edit_, settings_page_ == SettingsPage::preferences ? SW_SHOW : SW_HIDE);
         if (settings_reply_edit_) ShowWindow(settings_reply_edit_, settings_page_ == SettingsPage::reply ? SW_SHOW : SW_HIDE);
-        if (settings_presence_edit_) ShowWindow(settings_presence_edit_, settings_page_ == SettingsPage::presence ? SW_SHOW : SW_HIDE);
         button("settings-back", content_, L"< BACK", rect(0, px(2), px(68), px(22)), [this] { settings_back(); });
-        if (settings_page_ == SettingsPage::presence) {
-            const char* states[]{"at_pc", "away", "busy"};
-            const wchar_t* labels[]{L"AT PC", L"AWAY", L"BUSY"};
-            const int choice_width = (area.right - px(12)) / 3;
-            for (int i = 0; i < 3; ++i) {
-                const std::string state = states[i];
-                button("presence-state:" + state, content_, labels[i],
-                    rect(i * (choice_width + px(6)), px(64), choice_width, px(26)),
-                    [this, state] { presence_draft_state_ = state; feedback_.clear(); layout(); },
-                    true, false, presence_draft_state_ == state);
-            }
-            MoveWindow(settings_presence_edit_, px(4), px(131), area.right - px(8), px(23), FALSE);
-            ShowWindow(settings_presence_edit_, SW_SHOW);
-            button("presence-save", content_, L"SAVE", rect(0, area.bottom - px(29), px(62), px(23)),
-                   [this] { save_presence(); }, presence_draft_state_ == "at_pc" ||
-                   presence_draft_state_ == "away" || presence_draft_state_ == "busy");
-            return;
-        }
         if (settings_page_ == SettingsPage::preferences) {
-            button("settings-presence", content_, L"STATUS", rect(area.right - px(76), px(2), px(76), px(22)),
-                   [this] { open_presence(); });
             button("settings-replies", content_, L"MANAGE", rect(area.right - px(82), px(53), px(82), px(23)),
                    [this] { settings_page(SettingsPage::replies); });
             button("settings-busy", content_, busy() ? L"CHANGE" : L"SET TIMER", rect(area.right - px(82), px(111), px(82), px(23)),
@@ -2556,26 +2815,11 @@ private:
     void draw_settings(HDC dc, RECT area) {
         const auto heading = settings_page_ == SettingsPage::general ? L"SETTINGS" :
             settings_page_ == SettingsPage::preferences ? L"PREFERENCES" :
-            settings_page_ == SettingsPage::presence ? L"STATUS" :
             settings_page_ == SettingsPage::replies ? L"SAVED REPLIES" : saved_reply_index_ < 0 ? L"NEW REPLY" : L"EDIT REPLY";
         text(dc, heading, RECT{px(82), px(2), area.right - px(settings_page_ == SettingsPage::general ||
             settings_page_ == SettingsPage::preferences ? 82 : settings_page_ == SettingsPage::replies ? 66 : 0), px(24)}, title_font_, foreground,
              DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
         fill(dc, RECT{0, px(34), area.right, px(34) + 1}, border);
-        if (settings_page_ == SettingsPage::presence) {
-            text(dc, L"AVAILABILITY", RECT{0, px(43), area.right, px(59)}, small_font_, muted, DT_SINGLELINE);
-            text(dc, L"MESSAGE (OPTIONAL)", RECT{0, px(109), area.right, px(125)}, small_font_, muted, DT_SINGLELINE);
-            outline(dc, RECT{0, px(128), area.right, px(157)}, border);
-            text(dc, L"Agents can check this status.\nInput still needs approval.",
-                 RECT{0, px(173), area.right, px(198)}, small_font_, muted, DT_WORDBREAK | DT_NOPREFIX);
-            text(dc, L"Quiet notifications uses its own timer.",
-                 RECT{0, px(201), area.right, px(217)}, small_font_, subdued, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-            const bool showing_feedback = !feedback_.empty() && GetTickCount64() < feedback_until_;
-            text(dc, showing_feedback ? feedback_ : L"Enter to save. Back discards changes.",
-                 RECT{0, area.bottom - px(54), area.right, area.bottom - px(32)}, small_font_, showing_feedback ? orange : subdued,
-                 DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX);
-            return;
-        }
         if (settings_page_ == SettingsPage::preferences) {
             text(dc, L"SAVED REPLIES", RECT{0, px(43), area.right - px(94), px(62)}, small_font_, muted, DT_SINGLELINE);
             text(dc, std::to_wstring(saved_replies().size()) + L" replies", RECT{0, px(65), area.right - px(94), px(84)}, body_font_, foreground, DT_SINGLELINE);
@@ -2625,7 +2869,7 @@ private:
              DT_SINGLELINE | DT_NOPREFIX);
         outline(dc, rect(0, px(175), field_width, px(28)), border);
         outline(dc, rect(field_width + px(12), px(175), field_width, px(28)), border);
-        text(dc, L"360-800 x 360-1000", RECT{0, px(210), area.right - px(94), px(233)}, small_font_, subdued,
+        text(dc, L"900-3840 x 300-800", RECT{0, px(210), area.right - px(94), px(233)}, small_font_, subdued,
              DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
     }
     void layout_note_page(RECT area) {
@@ -2780,108 +3024,216 @@ private:
         }
         cache_note_images();
     }
-    void layout_cards(RECT area) {
-        const auto& records = snapshot_[tab_ == Tab::tasks ? "tasks" : "notes"];
-        int y = px(10);
-        int card_width = area.right - px(7);
-        std::vector<Json> ordered;
-        for (const auto& record : records)
-            if (tab_ == Tab::tasks || note_matches(record)) ordered.push_back(record);
-        std::reverse(ordered.begin(), ordered.end());
-        content_height_ = static_cast<int>(ordered.size()) * px(110) + px(10);
-        scroll() = std::clamp(scroll(), 0, std::max(0, content_height_ - static_cast<int>(area.bottom)));
-        for (const auto& item : ordered) {
-            auto kind = tab_ == Tab::tasks ? Detail::task : Detail::note;
-            button("card" + get_string(item, "id"), content_, widen(get_string(item, "title")),
-                rect(0, y - scroll(), card_width, px(96)), [this, kind, item] { begin_detail(kind, item); }, true, false, false, item);
-            y += px(110);
-        }
-    }
-    void layout_notifications(RECT area) {
-        rows_.clear();
-        row_tops_.clear();
-        std::vector<std::pair<Json, bool>> ordered;
-        auto matches = [this](const Json& item) {
-            return !item.value("archived", false) && (inbox_chat_.empty() || get_string(item, "chat") == inbox_chat_);
+
+    void build_cards() {
+        std::map<std::string, Card> by_chat;
+        std::map<std::string, std::int64_t> other_activity;
+        auto card_for = [&](const Json& item) -> Card& {
+            auto& card = by_chat[get_string(item, "chat")];
+            card.chat = get_string(item, "chat");
+            return card;
         };
-        for (const auto& item : snapshot_["requests"]) if (matches(item)) ordered.emplace_back(item, true);
-        for (const auto& item : snapshot_["jobs"]) if (matches(item)) ordered.emplace_back(item, false);
-        std::stable_sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) {
-            const bool pending_a = a.second && get_string(a.first, "status") == "pending";
-            const bool pending_b = b.second && get_string(b.first, "status") == "pending";
-            if (pending_a != pending_b) return pending_a;
-            return a.first.value("created_at", std::int64_t(0)) > b.first.value("created_at", std::int64_t(0));
-        });
-        int text_x = px(128);
-        int text_width = area.right - text_x - px(8);
-        int y = px(10);
-        for (const auto& [item, request] : ordered) {
-            std::string message = get_string(item, request ? "message" : "title");
-            int message_height = text_height(widen(message), text_width, body_font_, px(30));
-            int tail_height = 0;
-            int height;
-            if (request) {
-                auto status = get_string(item, "status");
-                if (status == "pending") {
-                    height = px(28) + message_height + px(35);
-                    if (get_string(item, "id") == reply_id_) height += px(142);
-                } else {
-                    auto response = shortened(get_string(item, "response"), 800);
-                    tail_height = text_height(response, text_width, small_font_, 0);
-                    height = px(28) + message_height + px(43) + std::min(tail_height, px(90));
-                }
-            } else {
-                auto status = get_string(item, "status");
-                tail_height = get_string(item, "output_tail").empty() ? 0 : px(34);
-                height = px(28) + message_height + tail_height + (status == "running" ? px(37) : px(97));
-            }
-            height = std::max(px(132), height);
-            rows_.push_back({item, request, y, height, message_height, tail_height});
-            row_tops_[get_string(item, "id")] = y;
-            y += height + px(15);
+        for (const auto& request : snapshot_["requests"]) {
+            if (request.value("archived", false)) continue;
+            auto& card = card_for(request);
+            const auto created = request.value("created_at", std::int64_t(0));
+            const auto resolved = request.value("resolved_at", created);
+            auto& latest = other_activity[card.chat];
+            latest = std::max({latest, created, resolved});
+            if (get_string(request, "status") == "pending") card.pending.push_back(request);
+            else if (card.answered.is_null() || resolved >= card.answered.value("resolved_at", std::int64_t(0)))
+                card.answered = request;
         }
-        content_height_ = y;
-        scroll() = std::clamp(scroll(), 0, std::max(0, content_height_ - static_cast<int>(area.bottom)));
+        for (const auto& job : snapshot_["jobs"]) {
+            if (job.value("archived", false)) continue;
+            auto& card = card_for(job);
+            const auto created = job.value("created_at", std::int64_t(0));
+            auto& latest = other_activity[card.chat];
+            latest = std::max({latest, created, job.value("finished_at", created)});
+            if (get_string(job, "status") == "running") card.running = true;
+            if (card.job.is_null() || created >= card.job.value("created_at", std::int64_t(0))) card.job = job;
+        }
+        for (const auto& done : snapshot_.value("inbox", Json::array())) {
+            if (done.value("archived", false)) continue;
+            card_for(done).done = done;
+        }
+        cards_.clear();
+        for (auto& [chat, card] : by_chat) {
+            (void)chat;
+            const auto others = other_activity[card.chat];
+            const auto finished = card.done.is_null() ? std::int64_t(0) : card.done.value("finished_at", std::int64_t(0));
+            card.activity = std::max(others, finished);
+            std::sort(card.pending.begin(), card.pending.end(), [](const Json& a, const Json& b) {
+                return a.value("created_at", std::int64_t(0)) < b.value("created_at", std::int64_t(0));
+            });
+            // Finishing wins over older activity; anything newer means the job
+            // carried on after reporting, so the card goes back to work.
+            card.state = !card.pending.empty() ? "waiting" : !card.done.is_null() && finished >= others ? "done" : "working";
+            cards_.push_back(std::move(card));
+        }
+        auto rank = [](const Card& card) { return card.state == "waiting" ? 0 : card.state == "working" ? 1 : 2; };
+        std::stable_sort(cards_.begin(), cards_.end(), [&](const Card& a, const Card& b) {
+            if (rank(a) != rank(b)) return rank(a) < rank(b);
+            return a.activity > b.activity;
+        });
+    }
+    int card_index(const std::string& id) const {
+        for (std::size_t i = 0; i < cards_.size(); ++i) {
+            const auto& card = cards_[i];
+            if (card.chat == id || get_string(card.job, "id") == id || get_string(card.done, "id") == id ||
+                get_string(card.answered, "id") == id) return static_cast<int>(i);
+            for (const auto& request : card.pending) if (get_string(request, "id") == id) return static_cast<int>(i);
+        }
+        return -1;
+    }
+    void scroll_to_card(const std::string& id) {
+        build_cards();
+        const int index = card_index(id);
+        if (index >= 0 && card_width_) {
+            RECT area{};
+            GetClientRect(content_, &area);
+            const int left = index * (card_width_ + card_gap_);
+            if (left < cards_scroll_) cards_scroll_ = left;
+            else if (left + card_width_ > cards_scroll_ + area.right) cards_scroll_ = left + card_width_ - area.right;
+        }
+        layout();
+    }
+    CardGeometry card_geometry(int x, int height) const {
+        CardGeometry g{};
+        const int w = card_width_;
+        g.tag = RECT{x, 0, x + w, px(20)};
+        g.close = RECT{x + w - px(22), 0, x + w, px(22)};
+        const int name_h = pixel_glyph_height * pixel_scale(2.0) + px(12);
+        g.name = RECT{x, px(26), x + w, px(26) + name_h};
+        g.actions = RECT{x, height - px(26), x + w, height};
+        const int box_h = std::clamp(height * 30 / 100, px(70), px(130));
+        g.box = RECT{x, g.actions.top - px(10) - box_h, x + w, g.actions.top - px(10)};
+        g.art = RECT{x + px(6), g.name.bottom + px(6), x + w - px(6), g.box.top - px(6)};
+        return g;
+    }
+    static std::wstring request_outcome(const Json& request) {
+        const auto status = get_string(request, "status");
+        const bool question = get_string(request, "kind") == "question";
+        if (status == "approved") return question ? L"ANSWERED YES" : L"YES - INPUT GRANTED";
+        if (status == "denied") return L"ANSWERED NO";
+        if (status == "custom") return L"REPLIED";
+        if (status == "expired") return L"EXPIRED WITHOUT AN ANSWER";
+        if (status == "released") return L"INPUT RELEASED";
+        return L"CANCELLED";
+    }
+    // A working card shows its newest event: a command result or an answer.
+    static bool card_shows_finished_job(const Card& card) {
+        if (card.job.is_null() || card.running || get_string(card.job, "status") == "running") return false;
+        const auto job_time = std::max(card.job.value("created_at", std::int64_t(0)), card.job.value("finished_at", std::int64_t(0)));
+        return card.answered.is_null() || job_time >= card.answered.value("resolved_at", std::int64_t(0));
+    }
+    // The text shown in a card's box, and the small line beneath it.
+    std::pair<std::wstring, std::wstring> card_text(const Card& card) const {
+        if (card.state == "waiting") {
+            const auto& request = card.pending.front();
+            std::wstring meta = get_string(request, "kind") == "question" ? L"QUESTION" :
+                L"INPUT LEASE " + std::to_wstring(std::max<std::int64_t>(1, request.value("lease_seconds", 300) / 60)) + L" MIN";
+            if (card.pending.size() > 1) meta += L"  +" + std::to_wstring(card.pending.size() - 1) + L" MORE";
+            return {widen(get_string(request, "message")), meta};
+        }
+        if (card.state == "done") {
+            const auto report = get_string(card.done, "report");
+            return {widen(get_string(card.done, "summary")), report.empty() ? L"NO REPORT" : L"REPORT " + widen(report)};
+        }
+        const auto job_time = card.job.is_null() ? std::int64_t(0) :
+            std::max(card.job.value("created_at", std::int64_t(0)), card.job.value("finished_at", std::int64_t(0)));
+        const auto answer_time = card.answered.is_null() ? std::int64_t(0) : card.answered.value("resolved_at", std::int64_t(0));
+        if (!card.job.is_null() && (card.running || job_time >= answer_time)) {
+            const auto status = get_string(card.job, "status");
+            if (status == "running")
+                return {widen(get_string(card.job, "title")), L"RUNNING SINCE " + display_time(card.job.value("created_at", std::int64_t(0)))};
+            if (status == "notice") return {widen(get_string(card.job, "title")), L"NOTICE"};
+            std::wstring body = widen(get_string(card.job, "title")) + (status == "completed" ? L" finished." : L" failed.");
+            const auto tail = get_string(card.job, "output_tail");
+            if (!tail.empty()) body += L"\n" + shortened(tail, 300, true);
+            return {body, L"EXIT " + std::to_wstring(card.job.value("exit_code", 0))};
+        }
+        if (!card.answered.is_null()) {
+            std::wstring body = widen(get_string(card.answered, "message"));
+            if (get_string(card.answered, "status") == "custom")
+                body += L"\n\n> " + widen(get_string(card.answered, "response"));
+            return {body, request_outcome(card.answered)};
+        }
+        return {L"", L""};
+    }
+    void dismiss_card(const Card& card) {
+        // Hide everything finished for this chat; pending and running items stay.
+        for (const auto& request : snapshot_["requests"])
+            if (get_string(request, "chat") == card.chat && get_string(request, "status") != "pending" && !request.value("archived", false))
+                mutate({{"op", "item.dismiss"}, {"kind", "request"}, {"id", request["id"]}});
+        for (const auto& job : snapshot_["jobs"])
+            if (get_string(job, "chat") == card.chat && get_string(job, "status") != "running" && !job.value("archived", false))
+                mutate({{"op", "item.dismiss"}, {"kind", "job"}, {"id", job["id"]}});
+        if (!card.done.is_null()) mutate({{"op", "item.dismiss"}, {"kind", "inbox"}, {"id", card.done["id"]}});
+    }
+    void layout_dashboard(RECT area) {
+        build_cards();
+        content_height_ = area.bottom;
+        card_gap_ = px(16);
+        const int count = std::max(1, (static_cast<int>(area.right) + card_gap_) / (px(230) + card_gap_));
+        card_width_ = std::min(px(290), (static_cast<int>(area.right) - (count - 1) * card_gap_) / count);
+        const int n = static_cast<int>(cards_.size());
+        cards_extent_ = n ? n * card_width_ + (n - 1) * card_gap_ : 0;
+        cards_scroll_ = std::clamp(cards_scroll_, 0, std::max(0, cards_extent_ - static_cast<int>(area.right)));
+        const int height = area.bottom - px(12);
         bool reply_found = false;
-        for (const auto& row : rows_) {
-            auto id = get_string(row.item, "id");
-            auto status = get_string(row.item, "status");
-            int row_y = row.top - scroll();
-            int actions_y = row_y + px(25) + row.message_height + px(7);
-            auto chat = get_string(row.item, "chat");
-            button(id + "chat", content_, L"@" + widen(chat), rect(text_x, row_y, text_width - px(91), px(21)),
-                   [this, chat] { select_inbox_chat(chat); });
-            auto& chat_button = buttons_.at(button_keys_.at(id + "chat"));
-            chat_button.bare = true;
-            chat_button.left_aligned = true;
-            if (row.request && status == "pending") {
-                int gap = px(6);
-                int small_width = (text_width - gap * 2) / 3;
-                bool available = get_string(row.item, "kind") != "input" || snapshot_["lease"].is_null();
-                button(id + "yes", content_, L"YES", rect(text_x, actions_y, small_width, px(21)), [this, id] { resolve(id, "approved"); }, available);
-                button(id + "no", content_, L"NO", rect(text_x + small_width + gap, actions_y, small_width, px(21)), [this, id] { resolve(id, "denied"); });
-                button(id + "custom", content_, L"CUSTOM", rect(text_x + (small_width + gap) * 2, actions_y, small_width, px(21)), [this, id] { begin_reply(id); });
+        for (int i = 0; i < n; ++i) {
+            const auto& card = cards_[static_cast<std::size_t>(i)];
+            const int x = i * (card_width_ + card_gap_) - cards_scroll_;
+            const auto g = card_geometry(x, height);
+            const int w = card_width_;
+            const auto key = card.chat;
+            auto third = [&](int slot) {
+                const int each = (w - 2 * px(8)) / 3;
+                return rect(x + slot * (each + px(8)), g.actions.top, slot == 2 ? w - 2 * (each + px(8)) : each, px(24));
+            };
+            if (card.state == "waiting") {
+                const auto request = card.pending.front();
+                const auto id = get_string(request, "id");
                 if (id == reply_id_ && reply_edit_) {
                     reply_found = true;
-                    button(id + "saved-replies", content_, L"SAVED REPLIES", rect(text_x, actions_y + px(31), text_width, px(21)),
-                           [this] { use_saved_reply(); });
-                    MoveWindow(reply_edit_, text_x + px(1), actions_y + px(61), text_width - px(10), px(65), FALSE);
+                    MoveWindow(reply_edit_, g.box.left + px(6), g.box.top + px(6), w - px(12),
+                               g.box.bottom - g.box.top - px(12), FALSE);
                     ShowWindow(reply_edit_, SW_SHOW);
-                    button(id + "send", content_, L"SEND", rect(text_x, actions_y + px(132), px(70), px(21)), [this] { send_reply(); });
-                    button(id + "cancel", content_, L"CANCEL", rect(text_x + px(76), actions_y + px(132), px(70), px(21)), [this] { cancel_reply(); });
+                    button(id + "send", content_, L"SEND", third(0), [this] { send_reply(); });
+                    button(id + "saved-replies", content_, L"SAVED", third(1), [this] { use_saved_reply(); });
+                    button(id + "cancel", content_, L"CANCEL", third(2), [this] { cancel_reply(); });
+                } else {
+                    const bool available = get_string(request, "kind") != "input" || snapshot_["lease"].is_null();
+                    button(id + "yes", content_, L"YES", third(0), [this, id] { resolve(id, "approved"); }, available);
+                    button(id + "custom", content_, L"CUSTOM", third(1), [this, id] { begin_reply(id); });
+                    button(id + "no", content_, L"NO", third(2), [this, id] { resolve(id, "denied"); });
                 }
-            } else if (row.request) {
-                if (status == "approved" && get_string(row.item, "kind") == "input")
-                    button(id + "release", content_, L"RELEASE INPUT", rect(text_x, row_y + row.height - px(29), px(128), px(21)), [this, id] { mutate({{"op", "request.release"}, {"id", id}}); });
-                else button(id + "dismiss", content_, L"DISMISS", rect(text_x, row_y + row.height - px(29), px(78), px(21)), [this, id] { mutate({{"op", "item.dismiss"}, {"kind", "request"}, {"id", id}}); });
-            } else if (status != "running") {
-                auto resume = get_string(row.item, "resume_text");
-                if (resume.empty()) resume = "@" + get_string(row.item, "chat") + ": " + get_string(row.item, "title") + ". Continue from this result.";
-                int box_y = actions_y + row.tail_height + px(6);
-                button(id + "copy", content_, L"COPY", rect(area.right - px(58), box_y, px(50), px(45)), [this, resume] { copy(resume); });
-                auto path = get_string(row.item, "log_path");
-                if (!path.empty()) button(id + "log", content_, L"VIEW LOG", rect(text_x, row_y + row.height - px(26), px(81), px(20)), [this, path] { view_log(path); });
-                button(id + "dismiss", content_, L"DISMISS", rect(area.right - px(86), row_y + row.height - px(26), px(78), px(20)), [this, id] { mutate({{"op", "item.dismiss"}, {"kind", "job"}, {"id", id}}); });
+                continue;
+            }
+            if (!card.running) button("card-dismiss:" + key, content_, L"DISMISS", g.close, [this, card] { dismiss_card(card); });
+            if (card.state == "done") {
+                const auto text = report_clipboard_text(get_string(card.done, "summary"), get_string(card.done, "report"));
+                button("card-copy-report:" + key, content_, L"COPY REPORT", rect(x, g.actions.top, w, px(24)),
+                       [this, text] { copy(text, L"Summary and report path copied."); });
+                continue;
+            }
+            const auto& lease = snapshot_["lease"];
+            if (!card.answered.is_null() && !lease.is_null() && lease.value("id", "") == get_string(card.answered, "id")) {
+                const auto id = get_string(card.answered, "id");
+                button("card-release:" + key, content_, L"RELEASE INPUT", rect(x, g.actions.top, w, px(24)),
+                       [this, id] { mutate({{"op", "request.release"}, {"id", id}}); });
+                continue;
+            }
+            if (card_shows_finished_job(card)) {
+                auto resume = get_string(card.job, "resume_text");
+                if (resume.empty()) resume = "@" + card.chat + ": " + get_string(card.job, "title") + ". Continue from this result.";
+                const auto path = get_string(card.job, "log_path");
+                const int half = (w - px(8)) / 2;
+                button("card-copy:" + key, content_, L"COPY", path.empty() ? rect(x, g.actions.top, w, px(24)) :
+                       rect(x, g.actions.top, half, px(24)), [this, resume] { copy(resume); });
+                if (!path.empty()) button("card-log:" + key, content_, L"VIEW LOG",
+                       rect(x + half + px(8), g.actions.top, w - half - px(8), px(24)), [this, path] { view_log(path); });
             }
         }
         if (reply_edit_ && !reply_found) ShowWindow(reply_edit_, SW_HIDE);
@@ -2890,38 +3242,61 @@ private:
     void draw_root(HDC dc) {
         RECT area{};
         GetClientRect(window_, &area);
-        fill(dc, area, background);
-        fill(dc, RECT{1, 1, area.right - 1, px(34)}, top_background);
-        outline(dc, area, border);
-        if (presence_bar_y_) text(dc, presence_message(),
-            RECT{px(118), presence_bar_y_, area.right - px(12), presence_bar_y_ + px(20)}, small_font_, muted,
-            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-        if (lease_bar_y_) {
-            auto label = L"INPUT IN USE: @" + widen(get_string(snapshot_["lease"], "chat"));
-            text(dc, label, RECT{px(12), lease_bar_y_, area.right - px(87), lease_bar_y_ + px(20)}, small_font_, orange,
-                DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+        fill(dc, area, frame);
+        // The working area (cards, status and notes) sits on a lighter panel.
+        fill(dc, RECT{middle_rect_.left - px(10), 1, arrow_rect_.left, area.bottom - 1}, background);
+        fill(dc, RECT{middle_rect_.left - px(10), px(10), middle_rect_.left - px(10) + 1, area.bottom - px(10)}, divider);
+        fill(dc, RECT{arrow_rect_.left, 1, arrow_rect_.left + 1, area.bottom - 1}, divider);
+        outline(dc, area, RGB(56, 56, 56));
+
+        const int heading = pixel_scale(2.0);
+        const RECT tasks_heading{tasks_rect_.left, tasks_rect_.top, tasks_rect_.left + pixel_width(L"Task List", heading) + px(16),
+                                 tasks_rect_.top + px(28)};
+        fill(dc, tasks_heading, well);
+        pixel_text(dc, L"Task List", RECT{tasks_heading.left + px(8), tasks_heading.top, tasks_heading.right, tasks_heading.bottom},
+                   heading, RGB(200, 200, 194), false);
+        fill(dc, task_entry_bounds_, well);
+
+        text(dc, L"MESSAGE (OPTIONAL)", RECT{presence_rect_.left, presence_box_.top - px(18), presence_rect_.right, presence_box_.top - px(2)},
+             small_font_, subdued, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        fill(dc, presence_box_, well);
+        if (get_string(presence(), "state", "unknown") == "unknown")
+            text(dc, L"Pick a status so agents know whether you are at the PC.",
+                 RECT{presence_rect_.left, presence_box_.bottom + px(8), presence_rect_.right, presence_box_.bottom + px(44)},
+                 small_font_, muted, DT_WORDBREAK | DT_NOPREFIX);
+        if (lease_line_y_) {
+            text(dc, L"INPUT IN USE", RECT{presence_rect_.left, lease_line_y_, presence_rect_.right - px(82), lease_line_y_ + px(22)},
+                 small_font_, orange, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+            text(dc, L"@" + widen(get_string(snapshot_["lease"], "chat")),
+                 RECT{presence_rect_.left, lease_line_y_ + px(22), presence_rect_.right, lease_line_y_ + px(40)},
+                 small_font_, muted, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
         }
-        if (busy_bar_y_) text(dc, busy_caption(),
-            RECT{px(12), busy_bar_y_, area.right - px(74), busy_bar_y_ + px(20)}, small_font_, muted,
-            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-        if (inbox_bar_y_) text(dc, inbox_chat_.empty() ? L"All chats · pending first" : L"@" + widen(inbox_chat_),
-            RECT{px(85), inbox_bar_y_, area.right - px(inbox_chat_.empty() ? 12 : 108), inbox_bar_y_ + px(22)},
-            small_font_, muted, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-        if (notes_bar_y_) {
-            auto label = untagged_filter_ ? L"Untagged" : note_filter_.empty() ? L"All notes" : L"# " + widen(note_filter_);
-            text(dc, label, RECT{px(85), notes_bar_y_, area.right - px(75), notes_bar_y_ + px(22)}, body_font_, muted,
-                 DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-            text(dc, std::to_wstring(visible_note_count_) + L" notes",
-                 RECT{area.right - px(75), notes_bar_y_, area.right - px(12), notes_bar_y_ + px(22)}, small_font_, subdued,
-                 DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-        }
-        if (!settings_open_ && tab_ != Tab::notifications && detail_ == Detail::none && !note_page_visible()) {
-            fill(dc, RECT{px(12), area.bottom - px(43), area.right - px(12), area.bottom - px(43) + 1}, border);
-            text(dc, L"Enter", RECT{area.right - px(67), area.bottom - px(30), area.right - px(15), area.bottom - px(8)},
-                 small_font_, subdued, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        if (quiet_line_y_) text(dc, busy_caption(), RECT{presence_rect_.left, quiet_line_y_, presence_rect_.right - px(58), quiet_line_y_ + px(22)},
+                                small_font_, muted, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+        if (!window_settings_.notes_collapsed()) {
+            pixel_text(dc, L"NOTES", RECT{notes_rect_.left, notes_rect_.top, notes_rect_.right, notes_rect_.top + px(30)},
+                       heading, RGB(200, 200, 194), false);
+            rounded(dc, search_bounds_, search_fill, search_bounds_.bottom - search_bounds_.top);
+            // A small magnifier drawn with lines.
+            const int cx = search_bounds_.left + px(11), cy = search_bounds_.top + px(11);
+            HPEN pen = CreatePen(PS_SOLID, std::max(1, px(1)), RGB(170, 170, 166));
+            auto old_pen = SelectObject(dc, pen);
+            auto old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+            Ellipse(dc, cx - px(5), cy - px(5), cx + px(4), cy + px(4));
+            MoveToEx(dc, cx + px(3), cy + px(3), nullptr);
+            LineTo(dc, cx + px(7), cy + px(7));
+            SelectObject(dc, old_brush);
+            SelectObject(dc, old_pen);
+            DeleteObject(pen);
+            if (filter_line_y_) {
+                auto label = untagged_filter_ ? L"Showing untagged notes" : L"Showing #" + widen(note_filter_);
+                text(dc, label, RECT{notes_rect_.left, filter_line_y_, notes_rect_.right - px(64), filter_line_y_ + px(20)},
+                     small_font_, muted, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+            }
         }
         if (note_command_bounds_.bottom > note_command_bounds_.top) {
-            fill(dc, note_command_bounds_, background);
+            fill(dc, note_command_bounds_, well);
             outline(dc, note_command_bounds_, border);
             if (note_command_choices_.empty()) {
                 auto bounds = note_command_bounds_;
@@ -2950,22 +3325,9 @@ private:
         fill(dc, area, background);
         if (settings_open_) draw_settings(dc, area);
         else if (detail_ != Detail::none) draw_detail(dc, area);
-        else if (tab_ == Tab::notifications) draw_notifications(dc, area);
         else if (note_page_visible()) draw_note_page(dc, area);
         else if (tag_picker_open_) draw_tag_picker(dc);
-        else if ((tab_ == Tab::tasks && snapshot_["tasks"].empty()) || (tab_ == Tab::notes && !visible_note_count_)) {
-            auto heading = tab_ == Tab::tasks ? L"No tasks yet." : untagged_filter_ ? L"No untagged notes." :
-                !note_filter_.empty() ? L"No notes with this tag." : L"No notes yet.";
-            text(dc, heading,
-                RECT{px(7), px(20), area.right - px(7), px(45)}, title_font_);
-            text(dc, tab_ == Tab::tasks ? L"Add one below, or let an agent add it." : L"Give a note a name below and press Enter.",
-                RECT{px(7), px(49), area.right - px(7), px(95)}, body_font_, muted);
-        }
-        if (!settings_open_ && detail_ == Detail::none && !tag_picker_open_ && content_height_ > area.bottom) {
-            int thumb = std::max(px(24), static_cast<int>(area.bottom) * static_cast<int>(area.bottom) / content_height_);
-            int top = (area.bottom - thumb) * scroll() / std::max(1, content_height_ - static_cast<int>(area.bottom));
-            fill(dc, RECT{area.right - std::max(1, px(1)), top, area.right, top + thumb}, border);
-        }
+        else draw_dashboard(dc, area);
         if (!settings_open_ && !feedback_.empty() && GetTickCount64() < feedback_until_) {
             RECT box{px(3), area.bottom - px(46), area.right - px(3), area.bottom - px(3)};
             if (detail_ == Detail::note && !note_metadata_open_ && !tag_picker_open_)
@@ -3159,62 +3521,61 @@ private:
              RECT{0, area.bottom - px(22), area.right - px(note_edit_ ? 174 : 73), area.bottom - px(1)}, small_font_, subdued,
              DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
     }
-    void draw_notifications(HDC dc, RECT area) {
-        if (rows_.empty()) {
-            request_sprite_.draw(dc, rect(px(8), px(22), px(90), px(75)));
-            text(dc, inbox_chat_.empty() ? L"No requests yet." : L"Nothing in this chat.", RECT{px(121), px(27), area.right - px(8), px(52)}, title_font_);
-            text(dc, inbox_chat_.empty() ? L"Your agents can ask here.\n\nUse knock info for instructions." : L"Choose All chats to see the rest of your inbox.",
-                 RECT{px(121), px(58), area.right - px(8), px(135)}, body_font_, muted);
+    void draw_dashboard(HDC dc, RECT area) {
+        if (cards_.empty()) {
+            const auto& character = character_for("KNOCK");
+            draw_character(dc, character, RECT{area.right / 2 - px(80), px(20), area.right / 2 + px(80), px(150)});
+            text(dc, L"No jobs yet.", RECT{0, px(165), area.right, px(190)}, title_font_, foreground,
+                 DT_CENTER | DT_SINGLELINE | DT_NOPREFIX);
+            text(dc, L"Agents appear here when they ask, run a command or finish.\nGive them knock info to get started.",
+                 RECT{px(20), px(195), area.right - px(20), px(240)}, body_font_, muted, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
             return;
         }
-        int text_x = px(128);
-        int text_width = area.right - text_x - px(8);
-        for (const auto& row : rows_) {
-            int y = row.top - scroll();
-            if (y + row.height < 0 || y > area.bottom) continue;
-            auto id = get_string(row.item, "id");
-            auto status = get_string(row.item, "status");
-            const Sprite& sprite = row.request ? (get_string(row.item, "kind") == "question" ? note_sprite_ : request_sprite_) : complete_sprite_;
-            sprite.draw(dc, rect(px(3), y + px(5), px(108), px(103)));
-            int time_width = px(83);
-            text(dc, display_time(row.item.value("created_at", std::int64_t(0))),
-                RECT{area.right - time_width - px(8), y + px(2), area.right - px(8), y + px(19)}, small_font_, muted,
-                DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            text(dc, widen(get_string(row.item, row.request ? "message" : "title")),
-                rect(text_x, y + px(25), text_width, row.message_height), body_font_);
-            int actions_y = y + px(25) + row.message_height + px(7);
-            if (row.request) {
-                if (status != "pending") {
-                    std::wstring label = status == "approved" ? L"YES - INPUT GRANTED" : status == "denied" ? L"NO" :
-                        status == "custom" ? L"CUSTOM REPLY" : status == "expired" ? L"EXPIRED" :
-                        status == "released" ? L"INPUT RELEASED" : L"CANCELLED";
-                    if (status == "approved" && get_string(row.item, "kind") == "question") label = L"YES";
-                    text(dc, label, rect(text_x, actions_y, text_width, px(18)), small_font_, status == "approved" ? orange : muted,
-                        DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-                    auto response = shortened(get_string(row.item, "response"), 800);
-                    text(dc, response, rect(text_x, actions_y + px(19), text_width, std::max(0, row.height - row.message_height - px(95))),
-                         small_font_, foreground, DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX);
-                } else if (id == reply_id_) {
-                    outline(dc, rect(text_x, actions_y + px(60), text_width, px(67)), border);
-                    draw_editor_scroll(dc, reply_edit_);
-                }
-            } else if (status == "running") {
-                text(dc, L"RUNNING - you can leave the agent idle", rect(text_x, actions_y, text_width, px(30)), small_font_, muted);
+        const int height = area.bottom - px(12);
+        const int tag_scale = pixel_scale(1.2);
+        const int base_name_scale = pixel_scale(2.0);
+        for (std::size_t i = 0; i < cards_.size(); ++i) {
+            const auto& card = cards_[i];
+            const int x = static_cast<int>(i) * (card_width_ + card_gap_) - cards_scroll_;
+            if (x + card_width_ < 0 || x > area.right) continue;
+            const auto g = card_geometry(x, height);
+            const bool waiting = card.state == "waiting", done = card.state == "done";
+            const std::wstring tag = waiting ? L"WAITING" : done ? L"DONE" : L"WORKING";
+            const int tag_w = pixel_width(tag, tag_scale) + px(14);
+            const RECT tag_box{x + (card_width_ - tag_w) / 2, g.tag.top + px(2), x + (card_width_ + tag_w) / 2, g.tag.bottom};
+            fill(dc, tag_box, waiting ? orange_fill : done ? green_fill : blue_fill);
+            pixel_text(dc, tag, tag_box, tag_scale, waiting ? orange : done ? green : blue, true);
+            const auto name = widen(card.chat);
+            int name_scale = base_name_scale;
+            while (name_scale > 1 && pixel_width(name, name_scale) > card_width_ - px(24)) --name_scale;
+            const int name_w = std::min(card_width_, (pixel_printable(name) ? pixel_width(name, name_scale) : card_width_) + px(20));
+            const RECT name_box{x + (card_width_ - name_w) / 2, g.name.top, x + (card_width_ + name_w) / 2, g.name.bottom};
+            fill(dc, name_box, raised);
+            pixel_text(dc, name, RECT{name_box.left + px(10), name_box.top, name_box.right - px(10), name_box.bottom},
+                       name_scale, RGB(200, 200, 194), true);
+            draw_character(dc, character_for(card.chat), g.art);
+            rounded(dc, g.box, well, px(10));
+            const bool replying = waiting && get_string(card.pending.front(), "id") == reply_id_ && reply_edit_;
+            if (!replying) {
+                const auto [body, meta] = card_text(card);
+                RECT inner = g.box;
+                InflateRect(&inner, -px(9), -px(7));
+                const int meta_h = meta.empty() ? 0 : line_height(small_font_) + px(3);
+                text(dc, body, RECT{inner.left, inner.top, inner.right, inner.bottom - meta_h}, small_font_, RGB(200, 200, 194),
+                     DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX | DT_EDITCONTROL);
+                if (!meta.empty())
+                    text(dc, meta, RECT{inner.left, inner.bottom - meta_h + px(3), inner.right, inner.bottom}, small_font_,
+                         done ? green : muted, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX | DT_PATH_ELLIPSIS);
             } else {
-                if (row.tail_height) {
-                    auto tail = shortened(get_string(row.item, "output_tail"), 300, true);
-                    text(dc, tail, rect(text_x, actions_y, text_width, row.tail_height), small_font_, muted,
-                        DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX);
-                }
-                int box_y = actions_y + row.tail_height + px(6);
-                RECT box{text_x, box_y, area.right - px(63), box_y + px(45)};
-                outline(dc, box, border);
-                InflateRect(&box, -px(4), -px(4));
-                auto resume = get_string(row.item, "resume_text");
-                if (resume.empty()) resume = "Paste this result into @" + get_string(row.item, "chat") + " to continue.";
-                text(dc, widen(resume), box, small_font_, foreground, DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX);
+                draw_editor_scroll(dc, reply_edit_);
             }
-            fill(dc, RECT{0, y + row.height, area.right - px(7), y + row.height + 1}, border);
+        }
+        if (cards_extent_ > area.right) {
+            const int track = area.bottom - px(3);
+            fill(dc, RECT{0, track, area.right, track + 1}, divider);
+            const int thumb = std::max(px(30), static_cast<int>(area.right) * static_cast<int>(area.right) / cards_extent_);
+            const int left = (area.right - thumb) * cards_scroll_ / std::max(1, cards_extent_ - static_cast<int>(area.right));
+            fill(dc, RECT{left, track - 1, left + thumb, track + 2}, RGB(90, 90, 90));
         }
     }
     void paint(HWND target, bool content) {
@@ -3247,9 +3608,11 @@ private:
             return;
         }
         if (detail_ != Detail::none) return;
-        int next = std::clamp(scroll() + amount, 0, std::max(0, content_height_ - viewport_height_));
-        if (next == scroll()) return;
-        scroll() = next;
+        RECT area{};
+        GetClientRect(content_, &area);
+        const int next = std::clamp(cards_scroll_ + amount, 0, std::max(0, cards_extent_ - static_cast<int>(area.right)));
+        if (next == cards_scroll_) return;
+        cards_scroll_ = next;
         layout();
     }
     void escape() {
@@ -3258,7 +3621,7 @@ private:
         else if (detail_ == Detail::note && note_metadata_open_) open_note_metadata();
         else if (detail_ == Detail::note && note_find_open_) close_note_find();
         else if (detail_ == Detail::note && note_edit_) cancel_note_message_edit();
-        else if (reply_edit_ && tab_ == Tab::notifications) cancel_reply();
+        else if (reply_edit_ && dashboard()) cancel_reply();
         else if (detail_ != Detail::none) leave_detail();
         else if (note_page_visible()) close_note_page();
         else hide();
@@ -3316,7 +3679,17 @@ private:
                 destroy_detail_edits();
             }
         }
-        if (get_string(event, "type") == "request" || get_string(event, "type") == "job") enqueue_banner(event);
+        if (get_string(event, "type") == "request" || get_string(event, "type") == "job" ||
+            get_string(event, "type") == "done") enqueue_banner(event);
+        // Another change never replaces a status message being typed.
+        if (presence_edit_ && !presence_dirty_ && GetFocus() != presence_edit_) {
+            const auto message = widen(get_string(presence(), "message"));
+            if (edit_text(presence_edit_) != message) {
+                populating_ = true;
+                SetWindowTextW(presence_edit_, message.c_str());
+                populating_ = false;
+            }
+        }
         update_tray();
         layout();
         if (follow_note) scroll_note_to_end();
@@ -3347,10 +3720,17 @@ private:
             note_draft_dirty_ = true;
             SetTimer(window_, 4, 600, nullptr);
         }
-        if (event == EN_CHANGE && !populating_ && id == 30 && tab_ == Tab::notes) {
+        if (event == EN_CHANGE && !populating_ && id == 30) {
             note_command_selection_ = 0;
+            notes_scroll_ = 0;
             layout();
         }
+        if (event == EN_CHANGE && !populating_ && id == 45) {
+            presence_dirty_ = true;
+            SetTimer(window_, 7, 1500, nullptr);
+        }
+        if (event == EN_KILLFOCUS && id == 45) save_presence_message(false);
+        if ((event == EN_SETFOCUS || event == EN_KILLFOCUS) && id == 30) layout();
         if (event == EN_CHANGE && !populating_ && id == 51) {
             note_selected_id_.clear();
             note_result_offset_ = 0;
@@ -3392,15 +3772,17 @@ private:
         if (message == WM_COMMAND) return command(wparam);
         if (message == WM_CTLCOLOREDIT || message == WM_CTLCOLORSTATIC || message == WM_CTLCOLORBTN) {
             HDC dc = reinterpret_cast<HDC>(wparam);
-            SetTextColor(dc, foreground);
-            SetBkColor(dc, background);
-            return reinterpret_cast<LRESULT>(edit_brush_);
+            const bool search = reinterpret_cast<HWND>(lparam) == footer_edit_;
+            SetTextColor(dc, search ? RGB(225, 225, 220) : foreground);
+            SetBkColor(dc, search ? search_fill : well);
+            return reinterpret_cast<LRESULT>(search ? search_brush_ : edit_brush_);
         }
         if (message == WM_MOUSEWHEEL) {
             if (settings_open_) return 0;
             wheel_remainder_ += GET_WHEEL_DELTA_WPARAM(wparam);
             int steps = wheel_remainder_ / WHEEL_DELTA;
             wheel_remainder_ %= WHEEL_DELTA;
+            if (content && dashboard()) { scroll_by(-steps * px(80)); return 0; }
             if (GetFocus() == footer_edit_ && !note_command_choices_.empty() && steps) {
                 const int count = static_cast<int>(note_command_choices_.size());
                 note_command_selection_ = static_cast<std::size_t>(std::clamp(static_cast<int>(note_command_selection_) - steps, 0, count - 1));
@@ -3483,23 +3865,6 @@ private:
                 dragging_note_scroll_ = false;
                 dragging_note_results_ = false;
             }
-            if (message == WM_LBUTTONDOWN && !settings_open_ && detail_ == Detail::none) {
-                RECT area{}; GetClientRect(content_, &area);
-                if (GET_X_LPARAM(lparam) >= area.right - px(10) && content_height_ > viewport_height_) {
-                    dragging_scroll_ = true;
-                    drag_start_y_ = GET_Y_LPARAM(lparam);
-                    drag_start_scroll_ = scroll();
-                    SetCapture(content_);
-                    return 0;
-                }
-            }
-            if (message == WM_MOUSEMOVE && dragging_scroll_) {
-                int movement = GET_Y_LPARAM(lparam) - drag_start_y_;
-                int target_scroll = drag_start_scroll_ + movement * content_height_ / std::max(1, viewport_height_);
-                scroll_by(target_scroll - scroll());
-                return 0;
-            }
-            if (message == WM_LBUTTONUP && dragging_scroll_) { dragging_scroll_ = false; ReleaseCapture(); return 0; }
             return DefWindowProcW(target, message, wparam, lparam);
         }
         if (taskbar_created_ && message == taskbar_created_) { add_tray(); update_tray(); return 0; }
@@ -3562,12 +3927,8 @@ private:
                 if (!feedback_.empty() && GetTickCount64() >= feedback_until_) {
                     feedback_.clear(); InvalidateRect(content_, nullptr, FALSE);
                 }
-            } else if (wparam == 2 && IsWindowVisible(window_) && !settings_open_ && tab_ == Tab::notifications) {
-                bool redraw = request_sprite_.advance();
-                redraw = complete_sprite_.advance() || redraw;
-                redraw = note_sprite_.advance() || redraw;
-                if (redraw) InvalidateRect(content_, nullptr, FALSE);
-            } else if (wparam == 3) { KillTimer(window_, 3); save_detail(SaveIntent::background); }
+            } else if (wparam == 7) save_presence_message(false);
+            else if (wparam == 3) { KillTimer(window_, 3); save_detail(SaveIntent::background); }
             else if (wparam == 4) { KillTimer(window_, 4); save_note_draft(); }
             else if (wparam == 6) {
                 KillTimer(window_, 6);
@@ -3595,7 +3956,7 @@ private:
             data.hWnd = window_;
             data.uID = 1;
             Shell_NotifyIconW(NIM_DELETE, &data);
-            KillTimer(window_, 1); KillTimer(window_, 2); KillTimer(window_, 3); KillTimer(window_, 4); KillTimer(window_, 6);
+            KillTimer(window_, 1); KillTimer(window_, 3); KillTimer(window_, 4); KillTimer(window_, 6); KillTimer(window_, 7);
             PostQuitMessage(0);
             return 0;
         }
@@ -3612,6 +3973,16 @@ private:
         try { return app->message(window, message, wparam, lparam, false); }
         catch (const std::exception& error) { app->feedback(widen(error.what())); return 0; }
     }
+    static LRESULT CALLBACK panel_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+        auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+        if (message == WM_NCCREATE) {
+            app = static_cast<App*>(reinterpret_cast<CREATESTRUCTW*>(lparam)->lpCreateParams);
+            SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
+        }
+        if (!app) return DefWindowProcW(window, message, wparam, lparam);
+        try { return app->panel_message(window, message, wparam, lparam); }
+        catch (const std::exception& error) { app->feedback(widen(error.what())); return 0; }
+    }
     static LRESULT CALLBACK content_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
         auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(window, GWLP_USERDATA));
         if (message == WM_NCCREATE) {
@@ -3625,7 +3996,7 @@ private:
     static LRESULT CALLBACK edit_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam, UINT_PTR, DWORD_PTR data) {
         auto* app = reinterpret_cast<App*>(data);
         if (message == WM_CONTEXTMENU) { app->app_context_menu(window, lparam); return 0; }
-        if (message == WM_MOUSEWHEEL && (window == app->note_query_edit_ || window == app->note_find_edit_))
+        if (message == WM_MOUSEWHEEL && (window == app->note_query_edit_ || window == app->note_find_edit_ || window == app->footer_edit_))
             return SendMessageW(app->window_, message, wparam, lparam);
         if (message == WM_PASTE && window == app->composer_edit_ && app->paste_note_attachment()) return 0;
         if (message == WM_CHAR && wparam == 0x16 && window == app->composer_edit_) {
@@ -3643,7 +4014,11 @@ private:
             if (wparam == VK_INSERT && GetKeyState(VK_SHIFT) < 0 && window == app->composer_edit_) {
                 SendMessageW(window, WM_PASTE, 0, 0); return 0;
             }
-            if (wparam == VK_RETURN && window == app->footer_edit_) { app->add_item(); return 0; }
+            if (wparam == VK_RETURN && window == app->footer_edit_) { app->notes_enter(); return 0; }
+            if (wparam == VK_RETURN && window == app->task_entry_edit_) { app->add_task(); return 0; }
+            if (wparam == VK_RETURN && window == app->presence_edit_ && GetKeyState(VK_SHIFT) >= 0) {
+                app->save_presence_message(true); return 0;
+            }
             if (wparam == VK_RETURN && window == app->tag_query_edit_) { app->activate_tag_query(); return 0; }
             if (wparam == VK_RETURN && window == app->composer_edit_ && GetKeyState(VK_SHIFT) >= 0) {
                 app->send_note_message(); return 0;
@@ -3658,7 +4033,8 @@ private:
              window == app->note_find_edit_ ||
              window == app->settings_width_edit_ || window == app->settings_height_edit_ || GetKeyState(VK_CONTROL) < 0 ||
              window == app->settings_retention_edit_ ||
-             window == app->settings_presence_edit_ ||
+             window == app->task_entry_edit_ ||
+             (window == app->presence_edit_ && GetKeyState(VK_SHIFT) >= 0) ||
              (window == app->composer_edit_ && GetKeyState(VK_SHIFT) >= 0))))) return 0;
         if (message == WM_CHAR && wparam == 0x06 && app->detail_ == Detail::note) return 0;
         return DefSubclassProc(window, message, wparam, lparam);
@@ -3683,13 +4059,14 @@ private:
             }
             if (message == WM_MOUSELEAVE) { found->second.hover = false; InvalidateRect(window, nullptr, FALSE); }
         }
-        if (message == WM_SETFOCUS && GetParent(window) == app->content_ && app->detail_ == Detail::none) {
-            RECT bounds{};
+        if (message == WM_SETFOCUS && GetParent(window) == app->content_ && app->dashboard()) {
+            // Keyboard focus on a card's button brings that card into view.
+            RECT bounds{}, area{};
             GetWindowRect(window, &bounds);
             MapWindowPoints(nullptr, app->content_, reinterpret_cast<POINT*>(&bounds), 2);
-            if (bounds.top < 0) app->scroll_by(bounds.top - app->px(4));
-            else if (bounds.bottom > app->viewport_height_)
-                app->scroll_by(bounds.bottom - app->viewport_height_ + app->px(4));
+            GetClientRect(app->content_, &area);
+            if (bounds.left < 0) app->scroll_by(bounds.left - app->px(4));
+            else if (bounds.right > area.right) app->scroll_by(bounds.right - area.right + app->px(4));
         }
         if (message == WM_KEYDOWN && wparam == VK_ESCAPE) { app->escape(); return 0; }
         if (message == WM_MOUSEWHEEL) return SendMessageW(app->window_, message, wparam, lparam);
