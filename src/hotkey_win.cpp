@@ -208,7 +208,9 @@ struct ShortcutDialog {
 
 namespace {
 // A private window station has no keyboard, so there is nothing to conflict with.
+// The screenshot tool draws on a hidden desktop and asks for no real shortcut.
 bool register_shortcut(HWND owner, int id, const HotkeyBinding& binding) {
+    if (GetEnvironmentVariableW(L"KNOCK_TEST_NO_HOTKEY", nullptr, 0)) return true;
     return RegisterHotKey(owner, id, binding.modifiers | MOD_NOREPEAT, binding.key) ||
            GetLastError() == ERROR_REQUIRES_INTERACTIVE_WINDOWSTATION;
 }

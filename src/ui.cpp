@@ -185,8 +185,7 @@ public:
         notes_view_ = CreateWindowExW(0, panel_class, L"Notes", WS_CHILD | WS_VISIBLE,
             0, 0, 10, 10, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(62)), instance_, this);
         if (!tasks_view_ || !notes_view_) throw std::runtime_error("Could not create the side panels.");
-        dpi_ = GetDpiForWindow(window_);
-        if (!dpi_) dpi_ = 96;
+        dpi_ = window_dpi();
         create_fonts();
         task_entry_edit_ = make_edit(window_, 38, false, L"New task...");
         footer_edit_ = make_edit(window_, 30, false, L"search");
@@ -424,6 +423,18 @@ private:
     ULONGLONG feedback_until_ = 0;
 
     int px(int value) const { return MulDiv(value, static_cast<int>(dpi_), 96); }
+    // KNOCK_TEST_DPI lets a copy using its own data folder draw at a chosen scale
+    // without changing the display. It is not the same as real display scaling.
+    static UINT forced_dpi() {
+        wchar_t value[16]{};
+        if (instance_tag().empty() || !GetEnvironmentVariableW(L"KNOCK_TEST_DPI", value, 16)) return 0;
+        return static_cast<UINT>(_wtoi(value));
+    }
+    UINT window_dpi() const {
+        if (const UINT forced = forced_dpi()) return forced;
+        const UINT dpi = GetDpiForWindow(window_);
+        return dpi ? dpi : 96;
+    }
     RECT rect(int x, int y, int width, int height) const { return RECT{x, y, x + width, y + height}; }
     bool dashboard() const {
         return !settings_open_ && detail_ == Detail::none && note_page_ == NotePage::list && !tag_picker_open_;
@@ -2213,6 +2224,8 @@ private:
         if (reply_id_ == id) cancel_reply(false);
     }
     void copy(const std::string& value, const wchar_t* done = L"Copied. Paste into the named agent chat.") {
+        // A hidden desktop shares the real clipboard; the screenshot tool leaves it alone.
+        if (!instance_tag().empty() && GetEnvironmentVariableW(L"KNOCK_TEST_NO_CLIPBOARD", nullptr, 0)) { feedback(done); return; }
         auto wide = widen(value);
         if (!OpenClipboard(window_)) { feedback(L"Clipboard is busy. Try again."); return; }
         HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, (wide.size() + 1) * sizeof(wchar_t));
@@ -3970,7 +3983,7 @@ private:
             return 0;
         case WM_SIZE: layout(); return 0;
         case WM_DPICHANGED: {
-            dpi_ = HIWORD(wparam);
+            dpi_ = forced_dpi() ? forced_dpi() : HIWORD(wparam);
             create_fonts();
             auto* bounds = reinterpret_cast<RECT*>(lparam);
             SetWindowPos(window_, nullptr, bounds->left, bounds->top, bounds->right - bounds->left,

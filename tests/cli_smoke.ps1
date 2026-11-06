@@ -131,6 +131,18 @@ try {
     Assert-Equal $conversation.note.messages[0].id $firstMessage.message.id 'First message survives restart'
     Assert-Equal $conversation.note.messages[1].text $messageText 'Unicode message survives restart'
 
+    $start = Invoke-Knock -Arguments @('start', '--chat', 'SMOKE-1', '--title', 'Checking in', '--report', 'report.md')
+    Assert-Equal $start.agent.status 'working' 'Check-in shows as working'
+    if (-not [IO.Path]::IsPathRooted($start.agent.report)) { throw 'Check-in report path is not absolute.' }
+    $update = Invoke-Knock -Arguments @('update', '--chat', 'SMOKE-1', '--status', 'Running the checks')
+    Assert-Equal $update.agent.status_text 'Running the checks' 'Status line'
+    Assert-Equal $update.agent.id $start.agent.id 'Status keeps the same record'
+    $done = Invoke-Knock -Arguments @('done', '--chat', 'SMOKE-1', '--summary', 'Finished.')
+    Assert-Equal $done.done.report $start.agent.report 'done uses the report named at check-in'
+    $inbox = Invoke-Knock -Arguments @('inbox', '--limit', '5')
+    Assert-Equal @($inbox.inbox | Where-Object { $_.chat -eq 'SMOKE-1' }).Count 1 'Finished job is in the inbox'
+    $null = Invoke-Knock -Arguments @('start', '--chat', 'SMOKE-1') -ExpectedExit 5
+
     Write-Host 'CLI smoke checks passed.'
     Write-Host "Test data: $testData"
 } finally {
