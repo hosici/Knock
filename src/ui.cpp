@@ -7,6 +7,7 @@
 #include "knock/note_images.hpp"
 #include "knock/window_settings.hpp"
 
+#include <objbase.h>
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <gdiplus.h>
@@ -29,7 +30,6 @@
 
 namespace knock {
 namespace {
-constexpr wchar_t window_class[] = L"Knock.Tray.v1";
 constexpr wchar_t content_class[] = L"Knock.Content.v1";
 constexpr wchar_t panel_class[] = L"Knock.Panel.v1";
 constexpr UINT tray_message = WM_APP + 1;
@@ -139,7 +139,7 @@ std::wstring tag_caption(const std::vector<std::string>& tags) {
 
 class App {
 public:
-    explicit App(HINSTANCE instance) : instance_(instance), store_(data_directory()), server_(store_) {}
+    explicit App(HINSTANCE instance) : instance_(instance), window_class_(tray_window_class()), store_(data_directory()), server_(store_) {}
     ~App() {
         store_.set_changed({});
         server_.stop();
@@ -161,7 +161,7 @@ public:
         wc.cbSize = sizeof(wc);
         wc.hInstance = instance_;
         wc.lpfnWndProc = root_proc;
-        wc.lpszClassName = window_class;
+        wc.lpszClassName = window_class_.c_str();
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         wc.hbrBackground = nullptr;
         if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
@@ -174,7 +174,7 @@ public:
         RegisterClassExW(&wc);
         edit_brush_ = CreateSolidBrush(well);
         search_brush_ = CreateSolidBrush(search_fill);
-        window_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, window_class, L"Knock",
+        window_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, window_class_.c_str(), L"Knock",
             WS_POPUP | WS_CLIPCHILDREN, 0, 0, 1720, 380, nullptr, nullptr, instance_, this);
         if (!window_) throw std::runtime_error("Could not create the tray window.");
         content_ = CreateWindowExW(WS_EX_CONTROLPARENT, content_class, L"Knock jobs", WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
@@ -232,7 +232,7 @@ public:
                     continue;
                 }
             }
-            if (IsWindowVisible(window_) && IsDialogMessageW(window_, &message)) continue;
+            if (window_shown(window_) && IsDialogMessageW(window_, &message)) continue;
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
@@ -281,6 +281,7 @@ private:
     };
 
     HINSTANCE instance_;
+    std::wstring window_class_;
     Store store_;
     PipeServer server_;
     HotkeyManager hotkey_{data_directory()};
@@ -686,7 +687,7 @@ private:
         SetWindowPos(window_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
     }
     void show(const std::string& focus_id = {}, bool pinned = false, bool inbox = false) {
-        if (!IsWindowVisible(window_)) keep_open_ = pinned;
+        if (!window_shown(window_)) keep_open_ = pinned;
         else if (pinned) keep_open_ = true;
         recover_completions();
         bool title_needs_attention = false;
@@ -724,6 +725,8 @@ private:
             L"Knock", RRF_RT_REG_SZ, nullptr, value, &size) == ERROR_SUCCESS;
     }
     void toggle_startup() {
+        // A test copy must never rewrite the real login item.
+        if (!instance_tag().empty()) { feedback(L"Start with Windows is off for a copy using its own data folder."); return; }
         HKEY key{};
         if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0,
             nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
@@ -739,7 +742,33 @@ private:
         RegCloseKey(key);
         if (result != ERROR_SUCCESS) feedback(L"Could not update startup setting.");
     }
+    // See tests/test_isolation.hpp. Only a copy using its own data folder can be
+    // driven this way; the real menu below is checked on the real desktop.
+    int test_menu(const std::vector<MenuItem>& items) {
+        std::vector<const MenuItem*> rows;
+        for (const auto& item : items) if (!item.separator) rows.push_back(&item);
+        SetPropW(window_, L"KnockTestMenu", reinterpret_cast<HANDLE>(static_cast<INT_PTR>(rows.size())));
+        const bool previous_menu = context_menu_;
+        context_menu_ = true;
+        int selected = 0;
+        MSG message{};
+        for (;;) {
+            const BOOL got = GetMessageW(&message, nullptr, 0, 0);
+            if (got <= 0) { if (got == 0) PostQuitMessage(static_cast<int>(message.wParam)); break; }
+            if (message.message == WM_APP + 31 && message.hwnd == window_) {
+                const auto row = static_cast<std::size_t>(message.wParam);
+                if (row < rows.size() && rows[row]->enabled) selected = static_cast<int>(rows[row]->id);
+                break;
+            }
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+        context_menu_ = previous_menu;
+        RemovePropW(window_, L"KnockTestMenu");
+        return selected;
+    }
     int popup_menu(POINT point, const std::vector<MenuItem>& items) {
+        if (!instance_tag().empty() && GetEnvironmentVariableW(L"KNOCK_TEST_MENU", nullptr, 0)) return test_menu(items);
         HMENU menu = CreatePopupMenu();
         if (!menu) return 0;
         MENUINFO appearance{};
@@ -827,7 +856,7 @@ private:
         }
         // A newly opened popup needs to keep focus. Returning it to the tray
         // here would immediately deactivate and hide an ordinary tray open.
-        if (IsWindowVisible(window_) || selected == 4) return;
+        if (window_shown(window_) || selected == 4) return;
         NOTIFYICONDATAW data{};
         data.cbSize = sizeof(data);
         data.hWnd = window_;
@@ -867,7 +896,7 @@ private:
         settings_page_ = SettingsPage::general;
         feedback_.clear();
         layout();
-        SetFocus(IsWindow(settings_return_focus_) && IsWindowVisible(settings_return_focus_)
+        SetFocus(IsWindow(settings_return_focus_) && window_shown(settings_return_focus_)
             ? settings_return_focus_ : window_);
         settings_return_focus_ = nullptr;
     }
@@ -993,7 +1022,7 @@ private:
             SetWindowTextW(reply_edit_, widen(replies[static_cast<std::size_t>(selected - 1)]).c_str());
             drafts_[reply_id_] = replies[static_cast<std::size_t>(selected - 1)];
             SetFocus(reply_edit_);
-            SendMessageW(reply_edit_, EM_SETSEL, -1, -1);
+            SendMessageW(reply_edit_, EM_SETSEL, static_cast<WPARAM>(-1), -1);
         }
     }
     void apply_trash_retention() {
@@ -1933,7 +1962,7 @@ private:
         save_note_draft();
         layout();
         SetFocus(composer_edit_);
-        SendMessageW(composer_edit_, EM_SETSEL, -1, -1);
+        SendMessageW(composer_edit_, EM_SETSEL, static_cast<WPARAM>(-1), -1);
     }
     void cancel_note_message_edit() {
         if (!note_edit_) return;
@@ -3445,7 +3474,7 @@ private:
         return info;
     }
     void draw_editor_scroll(HDC dc, HWND editor) const {
-        if (!editor || !IsWindowVisible(editor)) return;
+        if (!editor || !window_shown(editor)) return;
         auto info = editor_scroll(editor);
         if (info.total <= info.visible) return;
         int height = info.bounds.bottom - info.bounds.top;
@@ -3454,7 +3483,7 @@ private:
         fill(dc, RECT{info.bounds.right + px(5), top, info.bounds.right + px(5) + std::max(1, px(1)), top + thumb}, muted);
     }
     bool editor_gutter(HWND editor, int x, int y) const {
-        if (!editor || !IsWindowVisible(editor)) return false;
+        if (!editor || !window_shown(editor)) return false;
         auto info = editor_scroll(editor);
         return info.total > info.visible && x >= info.bounds.right && x <= info.bounds.right + px(9)
             && y >= info.bounds.top && y <= info.bounds.bottom;
@@ -3919,13 +3948,13 @@ private:
         switch (message) {
         case WM_HOTKEY:
             if (!context_menu_ && hotkey_.matches(wparam)) {
-                if (IsWindowVisible(window_)) hide(); else show({}, true);
+                if (window_shown(window_)) hide(); else show({}, true);
             }
             return 0;
         case tray_message: {
             UINT event = LOWORD(lparam);
             if (event == NIN_SELECT || event == NIN_KEYSELECT) {
-                if (IsWindowVisible(window_)) hide(); else show();
+                if (window_shown(window_)) hide(); else show();
             } else if (event == WM_CONTEXTMENU) context_menu();
             else if (event == NIN_BALLOONUSERCLICK) {
                 auto id = active_banner_ ? active_banner_->id : std::string();
@@ -3936,7 +3965,7 @@ private:
             return 0;
         }
         case WM_ACTIVATE:
-            if (LOWORD(wparam) == WA_INACTIVE && IsWindowVisible(window_) &&
+            if (LOWORD(wparam) == WA_INACTIVE && window_shown(window_) &&
                 !keep_open_ && !context_menu_ && !quitting_) hide();
             return 0;
         case WM_SIZE: layout(); return 0;
@@ -3953,7 +3982,7 @@ private:
             if (wparam == 1) {
                 store_.tick();
                 update_busy_mode();
-                if (busy() && IsWindowVisible(window_)) {
+                if (busy() && window_shown(window_)) {
                     InvalidateRect(window_, nullptr, FALSE);
                     if (settings_open_) InvalidateRect(content_, nullptr, FALSE);
                 }
@@ -4127,12 +4156,12 @@ int run_tray(HINSTANCE instance, bool show_on_start) {
     HANDLE mutex = nullptr;
     int result = 1;
     try {
-        auto name = L"Local\\Knock.Tray.v1." + user_identity();
+        const auto name = app_lock_name();
         mutex = CreateMutexW(nullptr, TRUE, name.c_str());
         if (!mutex) throw std::runtime_error("Could not create the app instance lock.");
         if (GetLastError() == ERROR_ALREADY_EXISTS) {
             if (show_on_start) {
-                HWND existing = FindWindowW(window_class, nullptr);
+                HWND existing = FindWindowW(tray_window_class().c_str(), nullptr);
                 if (existing) PostMessageW(existing, show_message, 0, 0);
             }
             CloseHandle(mutex);

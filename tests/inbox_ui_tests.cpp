@@ -1,4 +1,5 @@
 #include "knock/platform.hpp"
+#include "test_isolation.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -14,7 +15,6 @@ using knock::Json;
 using namespace std::chrono_literals;
 
 namespace {
-constexpr wchar_t tray_class[] = L"Knock.Tray.v1";
 void require(bool value, const std::string& text) { if (!value) throw std::runtime_error(text); }
 
 template<class Predicate>
@@ -60,7 +60,7 @@ BOOL CALLBACK collect(HWND window, LPARAM data) {
     GetClassNameW(window, type, 64);
     if (_wcsicmp(type, query.type) != 0 || (query.id && GetDlgCtrlID(window) != query.id)) return TRUE;
     if (!query.caption.empty() && text(window) != query.caption) return TRUE;
-    if (IsWindowVisible(window)) query.matches.push_back(window);
+    if (knock::window_shown(window)) query.matches.push_back(window);
     return TRUE;
 }
 std::vector<HWND> find(HWND root, const wchar_t* type, const std::wstring& caption = {}, int id = 0) {
@@ -90,18 +90,10 @@ GUITHREADINFO gui(HWND root) {
 }
 void menu_action(HWND root, const std::function<void()>& open, std::initializer_list<UINT> keys) {
     open();
-    HWND owner = nullptr;
-    try {
-        eventually([&] {
-            const auto state = gui(root);
-            owner = state.hwndMenuOwner;
-            return (state.flags & GUI_INMENUMODE) && owner &&
-                   GetWindowThreadProcessId(owner, nullptr) == GetWindowThreadProcessId(root, nullptr);
-        }, "native menu opens");
-        for (auto key : keys) require(PostMessageW(owner, WM_KEYDOWN, key, 1), "Cannot navigate test menu");
-        eventually([&] { return !(gui(root).flags & GUI_INMENUMODE); }, "native menu closes");
-        message(root, WM_NULL);
-    } catch (...) { PostMessageW(root, WM_CANCELMODE, 0, 0); throw; }
+    eventually([&] { return test_menu_open(root); }, "menu opens");
+    choose_test_menu(root, keys);
+    eventually([&] { return !test_menu_open(root); }, "menu closes");
+    message(root, WM_NULL);
 }
 void button_menu(HWND root, const std::wstring& caption, std::initializer_list<UINT> keys) {
     const auto target = button(root, caption);
@@ -181,7 +173,7 @@ void capture(HWND root, const std::filesystem::path& path) {
     HBITMAP bitmap = CreateCompatibleBitmap(dc, width, height);
     require(memory && bitmap, "Cannot allocate test screenshot");
     auto old = SelectObject(memory, bitmap);
-    require(BitBlt(memory, 0, 0, width, height, dc, 0, 0, SRCCOPY), "Cannot copy test screenshot");
+    require(PrintWindow(root, memory, 0), "Cannot copy test screenshot");
     SelectObject(memory, old);
     BITMAPINFO info{};
     info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -214,6 +206,7 @@ struct Application {
         require(GetTempPathW(MAX_PATH, temp), "Cannot find temp folder");
         directory = std::filesystem::path(temp) / (L"knock-inbox-ui-" + knock::widen(knock::make_id()));
         require(SetEnvironmentVariableW(L"KNOCK_DATA_DIR", directory.c_str()), "Cannot isolate application data");
+        SetEnvironmentVariableW(L"KNOCK_TEST_MENU", L"1");
     }
     ~Application() { try { close(); } catch (...) {} }
     void launch() {
@@ -224,18 +217,18 @@ struct Application {
             nullptr, executable.parent_path().c_str(), &startup, &child), "Cannot launch private test app");
         CloseHandle(child.hThread); process = child.hProcess; pid = child.dwProcessId;
         eventually([&] {
-            root = FindWindowW(tray_class, nullptr);
+            root = FindWindowW(knock::tray_window_class().c_str(), nullptr);
             if (!root) return false;
             DWORD actual = 0; GetWindowThreadProcessId(root, &actual);
             require(actual == pid, "Refusing to control another app's window");
-            return IsWindowVisible(root) && find(root, L"BUTTON", L"AT PC").size() == 1;
+            return knock::window_shown(root) && find(root, L"BUTTON", L"AT PC").size() == 1;
         }, "application startup");
         eventually([&] { try { return knock::send_command({{"op", "status"}}, false).value("ok", false); } catch (...) { return false; } }, "IPC startup");
         // Pin this test popup through the app's own hotkey message. No global
         // input is generated, even if this test runs on a normal desktop.
         message(root, WM_HOTKEY, 0x4B10, MAKELPARAM(MOD_CONTROL | MOD_ALT, 'K'));
         message(root, WM_HOTKEY, 0x4B10, MAKELPARAM(MOD_CONTROL | MOD_ALT, 'K'));
-        eventually([&] { return IsWindowVisible(root); }, "hotkey-pinned popup");
+        eventually([&] { return knock::window_shown(root); }, "hotkey-pinned popup");
     }
     void close() {
         if (!process) return;
@@ -253,7 +246,7 @@ void passed(const char* label) { std::cout << "PASS " << label << '\n' << std::f
 }
 
 int main() {
-    if (FindWindowW(tray_class, nullptr)) { std::cout << "SKIP: close KnockTray before inbox tests.\n"; return 77; }
+    if (skip_outside_isolation()) return 77;
     try {
         Application app;
         app.launch();

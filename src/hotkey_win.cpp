@@ -206,6 +206,14 @@ struct ShortcutDialog {
 };
 }
 
+namespace {
+// A private window station has no keyboard, so there is nothing to conflict with.
+bool register_shortcut(HWND owner, int id, const HotkeyBinding& binding) {
+    return RegisterHotKey(owner, id, binding.modifiers | MOD_NOREPEAT, binding.key) ||
+           GetLastError() == ERROR_REQUIRES_INTERACTIVE_WINDOWSTATION;
+}
+}
+
 bool valid_hotkey(const HotkeyBinding& binding, std::wstring* reason) {
     const auto fail = [&](const wchar_t* text) { if (reason) *reason = text; return false; };
     if (binding.modifiers & ~modifier_mask) return fail(L"Unsupported modifier.");
@@ -257,7 +265,7 @@ bool HotkeyManager::initialize(HWND owner) {
         return false;
     }
     if (!binding_.enabled) return true;
-    if (!RegisterHotKey(owner_, first_hotkey_id, binding_.modifiers | MOD_NOREPEAT, binding_.key)) {
+    if (!register_shortcut(owner_, first_hotkey_id, binding_)) {
         error_ = L"Shortcut is already in use or reserved by Windows. Choose another shortcut in Settings.";
         return false;
     }
@@ -284,7 +292,7 @@ bool HotkeyManager::apply(HotkeyBinding next) {
     const bool unchanged = active_id_ && next == binding_;
     if (next.enabled && !unchanged) {
         next_id = active_id_ == first_hotkey_id ? second_hotkey_id : first_hotkey_id;
-        if (!RegisterHotKey(owner_, next_id, next.modifiers | MOD_NOREPEAT, next.key)) {
+        if (!register_shortcut(owner_, next_id, next)) {
             error_ = L"Shortcut is already in use or reserved by Windows. Choose another combination.";
             return false;
         }

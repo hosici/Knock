@@ -10,8 +10,11 @@ $fixture = Join-Path $build 'runner_fixture.exe'
 if (-not (Test-Path $cli) -or -not (Test-Path $fixture)) {
     throw 'Build knock.exe and runner_fixture.exe before running this test.'
 }
-if (Get-Process KnockTray -ErrorAction SilentlyContinue) {
-    throw 'Exit Knock from its tray menu before running this isolated smoke test.'
+# KNOCK_DATA_DIR makes this copy a separate instance, so a running Knock is safe.
+# Run this through isolated_run.exe to keep its tray off the real desktop.
+function Stop-OwnTray {
+    Get-Process KnockTray -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -eq (Join-Path $build 'KnockTray.exe') } | Stop-Process -Force
 }
 $previousData = $env:KNOCK_DATA_DIR
 $testData = Join-Path $env:TEMP ('knock-smoke-' + [Guid]::NewGuid().ToString('N'))
@@ -116,7 +119,7 @@ try {
     if ($job.output_tail -notlike '*TAIL_SENTINEL*') { throw 'Output tail was lost after log cap.' }
 
     $survivor = Invoke-Knock -Arguments @('run', '--chat', 'TEST-1', '--title', 'Independent worker test', '--', $fixture, 'wait')
-    Get-Process KnockTray | Stop-Process -Force
+    Stop-OwnTray
     Start-Sleep -Seconds 3
     $job = Wait-JobResult -Id $survivor.job.id
     Assert-Equal $job.status 'completed' 'Worker survives tray exit'
@@ -131,6 +134,6 @@ try {
     Write-Host 'CLI smoke checks passed.'
     Write-Host "Test data: $testData"
 } finally {
-    Get-Process KnockTray -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq (Join-Path $build 'KnockTray.exe') } | Stop-Process -Force
+    Stop-OwnTray
     $env:KNOCK_DATA_DIR = $previousData
 }
