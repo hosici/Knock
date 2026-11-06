@@ -495,7 +495,7 @@ private:
         for (HFONT font : previous) if (font) DeleteObject(font);
     }
     void text(HDC dc, const std::wstring& value, RECT bounds, HFONT font,
-              COLORREF color = foreground, UINT flags = DT_LEFT | DT_WORDBREAK | DT_NOPREFIX) const {
+              COLORREF color = foreground, UINT flags = DT_LEFT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL) const {
         auto old = SelectObject(dc, font);
         SetTextColor(dc, color);
         SetBkMode(dc, TRANSPARENT);
@@ -506,10 +506,19 @@ private:
         HDC dc = GetDC(content_ ? content_ : window_);
         auto old = SelectObject(dc, font);
         RECT bounds{0, 0, std::max(width, px(20)), 0};
-        DrawTextW(dc, value.c_str(), static_cast<int>(value.size()), &bounds, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+        DrawTextW(dc, value.c_str(), static_cast<int>(value.size()), &bounds, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL);
         SelectObject(dc, old);
         ReleaseDC(content_ ? content_ : window_, dc);
         return std::max(minimum, static_cast<int>(bounds.bottom));
+    }
+    int text_width(const std::wstring& value, HFONT font) const {
+        HDC dc = GetDC(window_);
+        auto old = SelectObject(dc, font);
+        SIZE size{};
+        GetTextExtentPoint32W(dc, value.c_str(), static_cast<int>(value.size()), &size);
+        SelectObject(dc, old);
+        ReleaseDC(window_, dc);
+        return size.cx;
     }
     void feedback(std::wstring message) {
         feedback_ = std::move(message);
@@ -722,6 +731,8 @@ private:
             if (swscanf_s(place, L"%ld,%ld", &point.x, &point.y) == 2)
                 return MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
         }
+        // An open bar stays where it is when it resizes or a display changes.
+        if (window_shown(window_)) return MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
         POINT cursor{};
         GetCursorPos(&cursor);
         // The shortcut opens where the person is working; a tray click, by the tray.
@@ -2367,7 +2378,7 @@ private:
         TTTOOLINFOW info{};
         info.cbSize = sizeof(info);
         info.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
-        info.hwnd = window_;
+        info.hwnd = GetParent(control);
         info.uId = reinterpret_cast<UINT_PTR>(control);
         info.lpszText = const_cast<wchar_t*>(tip);
         SendMessageW(tooltip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&info));
@@ -2420,6 +2431,13 @@ private:
             auto model = buttons_.find(it->second);
             if (model != buttons_.end() && !model->second.seen) {
                 if (GetFocus() == model->second.handle) SetFocus(window_);
+                if (tooltip_) {
+                    TTTOOLINFOW info{};
+                    info.cbSize = sizeof(info);
+                    info.hwnd = GetParent(model->second.handle);
+                    info.uId = reinterpret_cast<UINT_PTR>(model->second.handle);
+                    SendMessageW(tooltip_, TTM_DELTOOLW, 0, reinterpret_cast<LPARAM>(&info));
+                }
                 DestroyWindow(model->second.handle);
                 buttons_.erase(model);
                 it = button_keys_.erase(it);
@@ -3800,7 +3818,7 @@ private:
             const auto name = widen(card.chat);
             const int scale = pixel_scale(2.0);
             const int available = std::max(px(40), right - left - when_w - px(84));
-            const int name_w = std::min(available, pixel_printable(name) ? pixel_width(name, scale) : available);
+            const int name_w = std::min(available, pixel_printable(name) ? pixel_width(name, scale) : text_width(name, title_font_));
             pixel_text(dc, name, RECT{left, top + pad, left + name_w, top + pad + px(18)}, scale, foreground, false);
             text(dc, waiting ? L"WAITING" : done ? L"DONE" : L"WORKING",
                  RECT{left + name_w + px(10), top + pad, left + name_w + px(84), top + pad + px(18)}, small_font_, tone,

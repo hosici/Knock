@@ -127,7 +127,7 @@ if(WIN32)
         target_link_libraries(agents_ui_tests PRIVATE knock_platform)
         add_dependencies(agents_ui_tests KnockTray knock)
         add_test(NAME agents_ui COMMAND agents_ui_tests)
-        set_tests_properties(agents_ui PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
+        set_tests_properties(agents_ui PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
         add_executable(ui_tests tests/ui_tests.cpp)
         target_link_libraries(ui_tests PRIVATE knock_platform)
         if(MSVC)
@@ -173,8 +173,9 @@ if(WIN32)
     install(FILES HANDOFF.md DESTINATION .)
     install(FILES docs/VALIDATION.md docs/PROTOCOL.md docs/FEATURES.md
         docs/CLI.md docs/AGENT_INSTRUCTIONS.md DESTINATION docs)
-    install(FILES docs/screenshots/bar-100.png docs/screenshots/bar-125.png
-        docs/screenshots/bar-150.png docs/screenshots/bar-notes-collapsed.png
+    install(FILES docs/screenshots/agents-100.png docs/screenshots/agents-125.png
+        docs/screenshots/agents-150.png docs/screenshots/agents-done-open.png
+        docs/screenshots/agents-notes-collapsed.png
         DESTINATION docs/screenshots)
     install(FILES third_party/nlohmann-LICENSE.txt DESTINATION licenses)
 endif()

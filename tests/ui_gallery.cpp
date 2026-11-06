@@ -260,6 +260,20 @@ void gallery() {
     click_if(L"RELEASE");
     settle();
 
+    // The awkward cases: a long name, a long message, a non-Latin name, and a row read in full.
+    send({{"op", "request.create"}, {"chat", "A-VERY-LONG-JOB-NAME-THAT-KEEPS-GOING-AND-GOING-AND-GOING-123456"}, {"timeout_seconds", 600},
+          {"message", std::string("May I use the mouse and keyboard? ") + std::string(700, 'x') + " That is the end of the message."}});
+    send({{"op", "agent.start"}, {"chat", "\xE4\xBD\x9C\xE6\xA5\xAD-1"}, {"title", "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E\xE3\x81\xAE\xE3\x82\xB8\xE3\x83\xA7\xE3\x83\x96"}});
+    shot(L"24-long-text");
+    {
+        RECT box{};
+        HWND list = FindWindowExW(root, nullptr, L"Knock.Content.v1", nullptr);
+        GetClientRect(list, &box);
+        SendMessageW(list, WM_LBUTTONUP, 0, MAKELPARAM(box.right / 3, 30));
+        shot(L"25-read-all");
+        SendMessageW(list, WM_LBUTTONUP, 0, MAKELPARAM(box.right / 3, 30));
+        settle();
+    }
     click(L"HIDE NOTES");
     shot(L"21-notes-collapsed");
     click(L"SHOW NOTES");

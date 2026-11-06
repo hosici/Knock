@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -62,12 +63,18 @@ struct App {
     HANDLE process = nullptr;
     HWND root = nullptr;
     HWND list = nullptr;
-    App() {
+    // dpi draws at that scale; small opens at the smallest window size.
+    explicit App(const wchar_t* dpi = nullptr, bool small = false) {
         wchar_t temp[MAX_PATH]{};
         require(GetTempPathW(MAX_PATH, temp) != 0, "No temp folder");
         directory = std::filesystem::path(temp) / (L"knock-agents-ui-" + knock::widen(knock::make_id()));
         require(SetEnvironmentVariableW(L"KNOCK_DATA_DIR", directory.c_str()) != 0, "Cannot isolate data");
         SetEnvironmentVariableW(L"KNOCK_TEST_MENU", L"1");
+        SetEnvironmentVariableW(L"KNOCK_TEST_DPI", dpi);
+        if (small) {
+            std::filesystem::create_directories(directory);
+            std::ofstream(directory / L"settings.json") << R"({"window":{"bar_width":900,"bar_height":300}})";
+        }
         const auto exe = folder / L"KnockTray.exe";
         auto line = knock::command_line({exe.wstring(), L"--show"});
         STARTUPINFOW startup{};
@@ -141,6 +148,68 @@ struct App {
     }
 };
 void passed(const char* label) { std::cout << "PASS " << label << '\n' << std::flush; }
+// Rows can scroll vertically; nothing may ever stick out sideways, overlap its
+// neighbour in a row, or (for controls outside the list) leave its parent.
+void everything_fits(HWND root, HWND list, const std::string& where) {
+    std::vector<HWND> controls = buttons(root);
+    RECT list_box{};
+    GetWindowRect(list, &list_box);
+    std::vector<RECT> boxes;
+    for (HWND control : controls) {
+        RECT box{}, parent{};
+        GetWindowRect(control, &box);
+        GetWindowRect(GetParent(control), &parent);
+        const bool scrolls = GetParent(control) == list && knock::window_shown(list);
+        require(box.left >= parent.left && box.right <= parent.right && box.right > box.left && box.bottom > box.top &&
+                (scrolls || (box.top >= parent.top && box.bottom <= parent.bottom)),
+                where + ": a control leaves its parent: " + knock::narrow(text(control)));
+        // A row scrolled past the edge of the list is clipped there, not overlapping.
+        RECT seen = box;
+        if (scrolls && !IntersectRect(&seen, &box, &list_box)) seen = RECT{};
+        boxes.push_back(seen);
+    }
+    for (std::size_t i = 0; i < boxes.size(); ++i)
+        for (std::size_t j = i + 1; j < boxes.size(); ++j) {
+            RECT overlap{};
+            require(!IntersectRect(&overlap, &boxes[i], &boxes[j]),
+                    where + ": controls overlap: " + knock::narrow(text(controls[i])) + " and " + knock::narrow(text(controls[j])));
+        }
+}
+void settle(HWND root) {
+    DWORD_PTR ignored = 0;
+    SendMessageTimeoutW(root, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 3000, &ignored);
+    std::this_thread::sleep_for(100ms);
+    SendMessageTimeoutW(root, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 3000, &ignored);
+}
+void fits_at(const wchar_t* dpi, bool small) {
+    App app(dpi, small);
+    const auto label = knock::narrow(dpi) + (small ? " smallest" : " default");
+    const std::string long_title(150, 'x');
+    app.good({L"start", L"--chat", L"A-VERY-LONG-JOB-NAME-THAT-KEEPS-GOING-AND-GOING-AND-GOING-123456", L"--title", knock::widen(long_title)});
+    app.good({L"update", L"--chat", L"WORK-1", L"--status", L"Measuring"});
+    app.good({L"request", L"--chat", L"ASK-1", L"--message", knock::widen(std::string(900, 'y')), L"--detach"});
+    app.good({L"request", L"--chat", L"ASK-2", L"--kind", L"question", L"--message", L"Short question?", L"--detach"});
+    app.good({L"notify", L"--chat", L"NOTICE-1", L"--message", L"Build finished."});
+    app.good({L"done", L"--chat", L"OLD-1", L"--summary", L"Finished.", L"--report", L"C:\\a\\very\\long\\path\\to\\a\\report\\that\\keeps\\going\\report.md"});
+    settle(app.root);
+    everything_fits(app.root, app.list, label + " agents");
+    click(app.root, L"DONE (1)");
+    settle(app.root);
+    everything_fits(app.root, app.list, label + " agents with Done open");
+    click(app.root, L"DONE (1)");
+    click(app.root, L"SETTINGS");
+    settle(app.root);
+    everything_fits(app.root, app.list, label + " settings");
+    click(app.root, L"MORE >");
+    settle(app.root);
+    everything_fits(app.root, app.list, label + " preferences");
+    click(app.root, L"MANAGE");
+    settle(app.root);
+    everything_fits(app.root, app.list, label + " saved replies");
+    click(app.root, L"< BACK"); click(app.root, L"< BACK"); click(app.root, L"< BACK");
+    settle(app.root);
+    std::cout << "PASS everything fits: " << label << '\n' << std::flush;
+}
 // Timestamps are in milliseconds; keep start order unambiguous.
 void tick() { std::this_thread::sleep_for(5ms); }
 }
@@ -148,6 +217,7 @@ void tick() { std::this_thread::sleep_for(5ms); }
 int main() {
     if (skip_outside_isolation()) return 77;
     try {
+        {
         App app;
         const auto first = app.good({L"start", L"--chat", L"FIRST-1", L"--title", L"The first job", L"--report", L"report.md"});
         require(first.at("agent").at("status") == "working" && first.contains("presence") &&
@@ -219,6 +289,10 @@ int main() {
         require(pending.code == 7 && pending.json.at("request").at("status") == "pending" &&
                 knock::send_command({{"op", "status"}}, false).at("lease").is_null(), "A check-in changed a request or granted input");
         passed("bad arguments fail cleanly; only the GUI answers requests, and a check-in grants nothing");
+        }
+        // The window at each scale it can draw at without changing the display.
+        for (const auto* dpi : {L"96", L"120", L"144", L"192"})
+            for (const bool small : {false, true}) fits_at(dpi, small);
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';
