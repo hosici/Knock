@@ -63,13 +63,14 @@
 ## Desktop acceptance still required
 
 - [ ] Real Windows 11 notification display and click-to-open
-- [ ] Real Windows taskbar/tray behavior, including Explorer restart
+- [ ] Real Windows taskbar/tray behavior, including Explorer restart and a real tray click
 - [ ] Real Windows Start-menu and focus changes while the hotkey-opened popup stays on top
-- [ ] Multiple monitors, alternate taskbar placement, and 125–200% display scaling
+- [x] Two monitors at real 100, 125 and 150% display scaling
+- [ ] Alternate taskbar placement, and 175–200% display scaling
 - [x] Bundled animated GIF files decoded and exercised under Wine/GDI+
 
 Implementation is complete for these paths; the unchecked items need the target
-desktop. Wine results are documented separately in
+desktop. Results are documented separately in
 VALIDATION.md.
 
 Imported image files are retained when an attachment, message, or note is

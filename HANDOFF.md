@@ -182,6 +182,9 @@ Real Windows 11 notification delivery/click behavior and Start-menu/focus behavi
 the pinned window remain desktop acceptance checks; VALIDATION.md says what the 0.8.0
 desktop session covered.
 
+Real-input tests go on the main monitor: the owner's agents run on the second one, and
+one wrong Esc could stop them, so never send a real Esc key.
+
 Never run a test copy without `KNOCK_DATA_DIR`, and run the GUI tests through
 `isolated_run.exe`. A private window station has its own clipboard and no tray or
 shell, and `IsWindowVisible` is always false there because its desktop window is never
