@@ -110,12 +110,12 @@ void require_presence_column(HWND root) {
     for (const auto* caption : {L"AT PC", L"AWAY", L"BUSY"}) button(root, caption);
     require(edit(root, 45) != nullptr, "Status message box is missing");
 }
-// Cards are ordered left to right; this picks a card's button by position.
-HWND leftmost(HWND root, const std::wstring& caption) {
+// Agents are listed top to bottom; this picks a row's button by position.
+HWND topmost(HWND root, const std::wstring& caption) {
     auto matches = find(root, L"BUTTON", caption);
     require(!matches.empty(), "No button: " + knock::narrow(caption));
     return *std::min_element(matches.begin(), matches.end(), [](HWND a, HWND b) {
-        RECT ra{}, rb{}; GetWindowRect(a, &ra); GetWindowRect(b, &rb); return ra.left < rb.left;
+        RECT ra{}, rb{}; GetWindowRect(a, &ra); GetWindowRect(b, &rb); return ra.top < rb.top;
     });
 }
 std::wstring clipboard_text() {
@@ -340,20 +340,32 @@ int main() {
         notice("BUILD-2");
         eventually([&] { return find(app.root, L"BUTTON", L"COPY").size() == 2 && find(app.root, L"BUTTON", L"YES").size() == 1; },
                    "waiting card and newer notice");
-        require(bounds(button(app.root, L"YES")).left < bounds(leftmost(app.root, L"COPY")).left,
-                "A newer completion pushed a waiting card after it");
+        require(bounds(button(app.root, L"YES")).top < bounds(topmost(app.root, L"COPY")).top,
+                "A newer completion pushed a waiting row below it");
         send({{"op", "done"}, {"chat", "BUILD-2"}, {"summary", "Both builds passed.\nNothing was committed."},
               {"report", "C:\\Reports\\build-2.md"}});
-        eventually([&] { return find(app.root, L"BUTTON", L"COPY REPORT").size() == 1 && find(app.root, L"BUTTON", L"COPY").size() == 1; },
-                   "the finished job's card turns to DONE");
-        click(button(app.root, L"COPY REPORT"));
+        eventually([&] { return find(app.root, L"BUTTON", L"DONE (1)").size() == 1 && find(app.root, L"BUTTON", L"COPY").size() == 1; },
+                   "the finished job moves into the closed Done section");
+        require(find(app.root, L"BUTTON", L"COPY REPORT").empty(), "Done section was not closed");
+        click(button(app.root, L"DONE (1)"));
+        eventually([&] { return find(app.root, L"BUTTON", L"COPY REPORT").size() == 1; }, "Done opens");
+        const auto children_before = find(app.root, L"BUTTON").size() + find(app.root, L"EDIT").size();
+        const auto copy_report = button(app.root, L"COPY REPORT");
+        const auto line_before = text(app.root);
+        click(copy_report);
         eventually([&] { return clipboard_text() == L"Both builds passed.\r\nNothing was committed.\r\n\r\nC:\\Reports\\build-2.md"; },
                    "COPY REPORT puts the exact summary and path on the clipboard");
+        // The whole confirmation: the button says so for a moment. No box, no text
+        // over the list, no new controls, and nothing in the strip's line of feedback.
+        require(text(copy_report) == L"COPIED" && text(app.root) == line_before &&
+                find(app.root, L"BUTTON").size() + find(app.root, L"EDIT").size() == children_before,
+                "COPY REPORT showed more than a small confirmation");
+        eventually([&] { return IsWindow(copy_report) && text(copy_report) == L"COPY REPORT"; }, "the button returns to COPY REPORT");
         const auto dismissed = find(app.root, L"BUTTON", L"DISMISS");
-        require(!dismissed.empty(), "Finished card has no dismiss button");
+        require(!dismissed.empty(), "Finished row has no dismiss button");
         PostMessageW(*std::max_element(dismissed.begin(), dismissed.end(), [](HWND a, HWND b) {
-            RECT ra{}, rb{}; GetWindowRect(a, &ra); GetWindowRect(b, &rb); return ra.left < rb.left; }), BM_CLICK, 0, 0);
-        eventually([&] { return find(app.root, L"BUTTON", L"COPY REPORT").empty(); }, "dismissed DONE card disappears");
+            RECT ra{}, rb{}; GetWindowRect(a, &ra); GetWindowRect(b, &rb); return ra.top < rb.top; }), BM_CLICK, 0, 0);
+        eventually([&] { return find(app.root, L"BUTTON", L"COPY REPORT").empty(); }, "dismissed DONE row disappears");
         require(send({{"op", "list"}, {"collection", "inbox"}}).at("items")[0].at("archived") == true,
                 "Dismissing a DONE card did not archive its record");
         require(result(pending).at("status") == "pending" && state().at("lease").is_null() &&
@@ -361,7 +373,7 @@ int main() {
         const auto expiring = request("EXPIRES", 1);
         eventually([&] { return result(expiring).at("status") == "expired"; }, "request expiry while busy");
         require(state().at("lease").is_null(), "Busy expiry granted input");
-        passed("waiting cards first, DONE cards, exact COPY REPORT text, dismissal, and expiry during busy mode");
+        passed("waiting rows first, a closed Done section, exact COPY REPORT text with a small confirmation, dismissal, and expiry during busy mode");
 
         open_settings(app.root);
         click(button(app.root, L"MORE >"));
@@ -407,7 +419,7 @@ int main() {
         back(app.root);
         const auto lease_check = request("LEASE-CHECK");
         eventually([&] { return find(app.root, L"BUTTON", L"YES").size() == 2; }, "lease layout fixture arrives");
-        click(leftmost(app.root, L"YES")); // The newest waiting card is first.
+        click(topmost(app.root, L"YES")); // The newest waiting row is first.
         eventually([&] { return result(lease_check).at("status") == "approved"; }, "UI grants private test lease");
         open_settings(app.root);
         settings_bounds(app.root);

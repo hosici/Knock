@@ -578,7 +578,7 @@ int main() {
         click(button(app.root, L"COPY"));
         require(clipboard_text() == knock::widen(continuation), "Copy did not preserve the exact continuation text");
         send({{"op", "item.dismiss"}, {"kind", "job"}, {"id", notice["id"]}});
-        eventually([&] { return buttons(app.root, L"COPY").empty(); }, "copied notification archived");
+        eventually([&] { return buttons(app.root, L"COPY").empty() && buttons(app.root, L"COPIED").empty(); }, "copied notification archived");
         passed("actual Copy button publishes the exact Unicode continuation to the clipboard");
 
         eventually([&] { return edit(app.root, 30) != nullptr; }, "notes search");

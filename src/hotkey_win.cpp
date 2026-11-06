@@ -11,11 +11,12 @@ using Json = nlohmann::json;
 constexpr int first_hotkey_id = 0x4B10;
 constexpr int second_hotkey_id = 0x4B11;
 constexpr UINT modifier_mask = MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN;
-constexpr COLORREF background = RGB(9, 9, 9);
-constexpr COLORREF foreground = RGB(225, 225, 217);
-constexpr COLORREF muted = RGB(151, 151, 145);
-constexpr COLORREF border = RGB(71, 71, 71);
-constexpr COLORREF orange = RGB(224, 129, 88);
+constexpr COLORREF background = RGB(12, 12, 12);
+constexpr COLORREF well = RGB(23, 23, 23);
+constexpr COLORREF foreground = RGB(232, 232, 226);
+constexpr COLORREF muted = RGB(172, 172, 164);
+constexpr COLORREF border = RGB(62, 62, 62);
+constexpr COLORREF orange = RGB(236, 170, 96);
 
 bool modifier_key(UINT key) {
     return key == VK_SHIFT || key == VK_CONTROL || key == VK_MENU ||
@@ -141,8 +142,8 @@ struct ShortcutDialog {
     }
     void draw_button(const DRAWITEMSTRUCT& item) {
         RECT bounds = item.rcItem;
-        fill(item.hDC, bounds, item.itemState & ODS_SELECTED ? RGB(31, 31, 29) : background);
-        auto frame = CreateSolidBrush((item.itemState & ODS_FOCUS) ? orange : border);
+        fill(item.hDC, bounds, item.itemState & ODS_SELECTED ? RGB(32, 32, 32) : well);
+        auto frame = CreateSolidBrush((item.itemState & ODS_FOCUS) ? muted : border);
         FrameRect(item.hDC, &bounds, frame);
         DeleteObject(frame);
         wchar_t caption[128]{};
@@ -332,7 +333,9 @@ bool HotkeyManager::configure(HWND owner) {
     ShortcutDialog dialog(*this);
     dialog.dpi = GetDpiForWindow(owner);
     if (!dialog.dpi) dialog.dpi = 96;
-    dialog.font = CreateFontW(-dialog.px(12), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+    wchar_t forced[16]{};
+    if (GetEnvironmentVariableW(L"KNOCK_TEST_DPI", forced, 16)) dialog.dpi = static_cast<UINT>(_wtoi(forced));
+    dialog.font = CreateFontW(-dialog.px(13), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
         FIXED_PITCH | FF_MODERN, L"Consolas");
     WNDCLASSW window_class{};

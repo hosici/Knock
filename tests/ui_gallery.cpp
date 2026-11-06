@@ -255,8 +255,10 @@ void gallery() {
     set_text(45, L"Out for coffee. Headless work is fine.");
     click(L"AWAY");
     click(L"YES");
+    std::this_thread::sleep_for(400ms);
     shot(L"20-away-with-lease");
     click_if(L"RELEASE");
+    settle();
 
     click(L"HIDE NOTES");
     shot(L"21-notes-collapsed");
